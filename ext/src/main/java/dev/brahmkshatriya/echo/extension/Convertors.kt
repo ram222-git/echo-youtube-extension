@@ -257,6 +257,7 @@ fun YtmSong.toTrack(
             isLikeable = true,
             isHideable = true,
             isShareable = true,
+            streamables = dev.brahmkshatriya.echo.extension.endpoints.EchoEnhancedSongEndpoint.createDefaultStreamables(id),
             extras = extras.apply {
                 put("videoId", id)
                 put("availability", "public")

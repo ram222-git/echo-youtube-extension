@@ -98,18 +98,24 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             true
         ),
         SettingSwitch(
+            "Enable Video Qualities & Background",
+            "enable_video",
+            "Show video playback and video background options in Quality Selection. Turn off to show only audio qualities.",
+            true
+        ),
+        SettingSwitch(
             "Prefer Videos",
             "prefer_videos",
             "Prefer videos over audio when available.",
             false
         ),
         SettingList(
-            "Video Quality [Most of Time only 360p is available]",
+            "Video Quality",
             "video_quality",
-            "Maximum video quality for playback. Higher quality uses more data and may buffer more.",
-            entryTitles = listOf("360p", "480p", "720p", "Best Available"),
-            entryValues = listOf("360", "480", "720", "999999"),
-            defaultEntryIndex = 1  
+            "Maximum video quality for playback.",
+            entryTitles = listOf("360p", "480p", "720p", "1080p", "Best Available"),
+            entryValues = listOf("360", "480", "720", "1080", "999999"),
+            defaultEntryIndex = 3
         )
     )
 
@@ -167,8 +173,13 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         return components.trackLoader.loadStreamableMedia(streamable, preferVideos)
     }
     
-   override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
-        return components.trackLoader.loadTrackDetails(track, thumbnailQuality)
+    override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
+        return components.trackLoader.loadTrackDetails(
+            track,
+            thumbnailQuality,
+            components.enableVideo,
+            components.preferVideos
+        )
     }
 
     private suspend fun loadRelated(track: Track): List<Shelf> {

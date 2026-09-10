@@ -7,7 +7,6 @@ import dev.brahmkshatriya.echo.extension.endpoints.EchoEnhancedSongEndpoint
 import dev.brahmkshatriya.echo.extension.streaming.YouTubeStreamResolver
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 
-
 class TrackLoader(
     private val authManager: YouTubeAuthManager,
     private val enhancedSongEndpoint: EchoEnhancedSongEndpoint,
@@ -15,31 +14,33 @@ class TrackLoader(
 ) {
     suspend fun loadTrackDetails(
         track: Track,
-        thumbnailQuality: ThumbnailProvider.Quality
+        thumbnailQuality: ThumbnailProvider.Quality,
+        enableVideo: Boolean = true,
+        preferVideos: Boolean = false
     ): Track {
-
         try {
             authManager.ensureVisitorId().getOrNull()
         } catch (e: Exception) {
             println("Failed to ensure visitor ID in loadTrack: ${e.message}")
         }
 
-        return enhancedSongEndpoint.loadEnhancedTrack(track.id, track, thumbnailQuality)
+        return enhancedSongEndpoint.loadEnhancedTrack(track.id, track, thumbnailQuality, enableVideo, preferVideos)
     }
 
     suspend fun loadStreamableMedia(
         streamable: Streamable,
         preferVideos: Boolean
     ): Streamable.Media {
-        when (streamable.type) {
-            Streamable.MediaType.Server -> {
-                val videoId = streamable.extras["videoId"]
-                    ?: throw Exception("No video ID found. This track may not be playable.")
+        val videoId = streamable.extras["videoId"]
+            ?: streamable.id.substringAfterLast("_").takeIf { it.isNotBlank() }
+            ?: throw Exception("No video ID found. This track may not be playable.")
 
-                return streamResolver.resolveStreamable(videoId, preferVideos)
+        return when (streamable.type) {
+            Streamable.MediaType.Server -> {
+                streamResolver.resolveStreamable(streamable, videoId, preferVideos)
             }
             Streamable.MediaType.Background -> {
-                throw Exception("Background streamables not supported")
+                streamResolver.resolveBackground(streamable, videoId)
             }
             Streamable.MediaType.Subtitle -> {
                 throw Exception("Subtitles not supported")
