@@ -14,6 +14,7 @@ import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylist
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylistBuilder
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmSong
 import dev.toastbits.ytmkt.model.internal.TextRun
+import dev.toastbits.ytmkt.radio.BuiltInRadioContinuation
 import dev.toastbits.ytmkt.radio.RadioContinuation
 import io.ktor.client.call.body
 import io.ktor.client.request.request
@@ -171,7 +172,7 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             builder.item_set_ids = items.map { it.second ?: "Unknown" }
             builder.item_count = builder.item_count
             builder.continuation = continuationToken?.let {
-                RadioContinuation(it, RadioContinuation.Type.PLAYLIST)
+                BuiltInRadioContinuation(it, BuiltInRadioContinuation.Type.PLAYLIST)
             }
 
             val continuationItems =
@@ -184,7 +185,7 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 val cont =
                     parsed.continuationContents.musicPlaylistShelfContinuation.continuations?.firstOrNull()?.nextContinuationData?.continuation
                 builder.continuation =
-                    cont?.let { RadioContinuation(it, RadioContinuation.Type.PLAYLIST) }
+                    cont?.let { BuiltInRadioContinuation(it, BuiltInRadioContinuation.Type.PLAYLIST) }
             }
 
             var relatedId =

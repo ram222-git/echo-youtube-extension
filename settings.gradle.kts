@@ -13,6 +13,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven { url = uri("https://jitpack.io") }
+        maven { url = uri("https://gitlab.com/api/v4/projects/58177411/packages/maven") }
     }
 }
 

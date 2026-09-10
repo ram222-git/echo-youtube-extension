@@ -1,7 +1,7 @@
 package dev.brahmkshatriya.echo.extension.endpoints
 
-import dev.brahmkshatriya.echo.extension.endpoints.EchoSongFeedEndpoint.Companion.clientContext
 import dev.brahmkshatriya.echo.extension.endpoints.EchoSongFeedEndpoint.Companion.processRows
+import dev.toastbits.ytmkt.impl.youtubei.YoutubeiPostBody
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
 import dev.toastbits.ytmkt.model.external.YoutubePage
@@ -16,7 +16,7 @@ class EchoArtistMoreEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         val response: HttpResponse = api.client.request {
             endpointPath("browse")
             addApiHeadersWithAuthenticated()
-            postWithBody(clientContext) {
+            postWithBody(YoutubeiPostBody.MOBILE.getPostBody(api)) {
                 put("browseId", param.browse_id)
                 put("params", param.browse_params)
             }

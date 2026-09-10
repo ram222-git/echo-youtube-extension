@@ -34,34 +34,50 @@ data class MusicTwoRowItemRenderer(
             hostItem: YtmMediaItem,
             api: YtmApi
         ): List<YtmArtist>? {
-            val artists: List<YtmArtist>? = subtitle?.runs?.mapNotNull { run ->
-                val browseEndpoint: dev.toastbits.ytmkt.model.internal.BrowseEndpoint? =
-                    run.navigationEndpoint?.browseEndpoint
-                if (browseEndpoint?.browseId == null || browseEndpoint.getMediaItemType() != YtmMediaItem.Type.ARTIST) {
-                    return@mapNotNull null
-                }
-
-                return@mapNotNull YtmArtist(
-                    browseEndpoint.browseId!!,
-                    name = run.text
-                )
+            val validRuns = subtitle?.runs.orEmpty().filter { run ->
+                val text = run.text.trim()
+                text.isNotEmpty() && text != "•" && text != "·" && !text.matches(Regex("""[•·\s]+"""))
             }
 
-            if (!artists.isNullOrEmpty()) {
-                return artists
+            val artistsWithEndpoint = validRuns.mapNotNull { run ->
+                val browseEndpoint: dev.toastbits.ytmkt.model.internal.BrowseEndpoint =
+                    run.navigationEndpoint?.browseEndpoint ?: return@mapNotNull null
+                val browseId = browseEndpoint.browseId ?: return@mapNotNull null
+                val isArtist = browseEndpoint.getMediaItemType() == YtmMediaItem.Type.ARTIST ||
+                        browseId.startsWith("UC") ||
+                        browseEndpoint.getPageType()?.contains("ARTIST", ignoreCase = true) == true ||
+                        browseEndpoint.getPageType()?.contains("CHANNEL", ignoreCase = true) == true
+                if (!isArtist) return@mapNotNull null
+
+                val artistName = run.text.trim().takeIf { it.isNotEmpty() && it != "•" } ?: return@mapNotNull null
+                YtmArtist(browseId, name = artistName)
+            }
+
+            if (artistsWithEndpoint.isNotEmpty()) {
+                return artistsWithEndpoint
             }
 
             if (hostItem is YtmSong) {
-                val songType: YtmSong.Type? = api.item_cache.getSong(
-                    hostItem.id,
-                    setOf(MediaItemCache.SongKey.TYPE)
-                )?.type
+                val nonMetadataRuns = validRuns.filter { run ->
+                    val text = run.text.trim()
+                    !text.equals("Song", ignoreCase = true) &&
+                    !text.equals("Video", ignoreCase = true) &&
+                    !text.equals("Single", ignoreCase = true) &&
+                    !text.equals("Album", ignoreCase = true) &&
+                    !text.matches(Regex("""\d{1,2}:\d{2}""")) &&
+                    !text.matches(Regex("""\d{4}""")) &&
+                    !text.contains("views", ignoreCase = true) &&
+                    !text.contains("plays", ignoreCase = true)
+                }
 
-                val index: Int = if (songType == YtmSong.Type.VIDEO) 0 else 1
-                subtitle?.runs?.getOrNull(index)?.also {
+                val artistRun = nonMetadataRuns.firstOrNull()
+                if (artistRun != null) {
+                    val fallbackId = artistRun.navigationEndpoint?.browseEndpoint?.browseId
+                        ?: YtmArtist.getForItemId(hostItem)
                     return listOf(
-                        YtmArtist(YtmArtist.getForItemId(hostItem)).copy(
-                            name = it.text
+                        YtmArtist(
+                            id = fallbackId,
+                            name = artistRun.text.trim()
                         )
                     )
                 }

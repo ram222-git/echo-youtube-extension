@@ -66,7 +66,7 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
             tabs[0].tabRenderer.content!!.musicQueueRenderer.content!!.playlistPanelRenderer.contents.first().playlistPanelVideoRenderer!!
 
         val title: String = video.title.first_text
-        val liked =
+        val isLiked =
             responseData.playerOverlays?.playerOverlayRenderer?.actions?.firstOrNull()?.likeButtonRenderer?.likeStatus == "LIKE"
 
         val artists: List<YtmArtist> = video.getArtists().getOrThrow() ?: emptyList()
@@ -82,11 +82,12 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
             artists = artists.map { it.toArtist(ThumbnailProvider.Quality.HIGH) },
             album = album?.toAlbum(false, ThumbnailProvider.Quality.HIGH),
             duration = duration,
-            isLiked = liked,
             extras = mutableMapOf<String, String>().apply {
                 relatedBrowseId?.let { put("relatedId", it) }
                 lyricsBrowseId?.let { put("lyricsId", it) }
+                put("isLiked", isLiked.toString())
             },
+
         )
     }
 }
@@ -287,22 +288,23 @@ data class YoutubeiNextResponse(
         val badges: List<MusicResponsiveListItemRenderer.Badge>?
     ) {
         fun getArtists(): Result<List<YtmArtist>?> = runCatching {
-            // Get artist IDs directly
             val artists: List<YtmArtist> = (longBylineText.runs.orEmpty() + title.runs.orEmpty())
                 .mapNotNull { run ->
-                    val browse_id: String = run.navigationEndpoint?.browseEndpoint?.browseId
+                    val browseId: String = run.navigationEndpoint?.browseEndpoint?.browseId
                         ?: return@mapNotNull null
 
-                    val page_type = run.browse_endpoint_type?.let { type ->
-                        YtmMediaItem.Type.fromBrowseEndpointType(type)
-                    }
-                    if (page_type != YtmMediaItem.Type.ARTIST) {
+                    val isArtist = run.browse_endpoint_type?.let { type ->
+                        YtmMediaItem.Type.fromBrowseEndpointType(type) == YtmMediaItem.Type.ARTIST
+                    } ?: (browseId.startsWith("UC") || run.navigationEndpoint?.browseEndpoint?.getPageType()?.contains("ARTIST", ignoreCase = true) == true)
+
+                    if (!isArtist) {
                         return@mapNotNull null
                     }
 
-                    return@mapNotNull YtmArtist(
-                        id = browse_id,
-                        name = run.text
+                    val artistName = run.text.trim().takeIf { it.isNotEmpty() && it != "•" } ?: return@mapNotNull null
+                    YtmArtist(
+                        id = browseId,
+                        name = artistName
                     )
                 }
 
@@ -310,19 +312,26 @@ data class YoutubeiNextResponse(
                 return@runCatching artists
             }
 
-            val menu_artist: String? =
+            val validRuns = longBylineText.runs.orEmpty().filter {
+                val t = it.text.trim()
+                t.isNotEmpty() && t != "•" && t != "·" && !t.matches(Regex("""[•·\s]+"""))
+            }
+
+            val menuArtistId: String? =
                 menu.menuRenderer.getArtist()?.menuNavigationItemRenderer?.navigationEndpoint?.browseEndpoint?.browseId
-            if (menu_artist != null) {
-                val artist_title: TextRun? =
-                    longBylineText.runs?.firstOrNull { it.navigationEndpoint == null }
-                if (artist_title != null) {
-                    return@runCatching listOf(
-                        YtmArtist(
-                            id = menu_artist,
-                            name = artist_title.text
-                        )
+
+            val firstNonAlbumRun = validRuns.firstOrNull {
+                it.navigationEndpoint?.browseEndpoint?.getPageType() != "MUSIC_PAGE_TYPE_ALBUM" &&
+                !it.text.trim().matches(Regex("""\d{4}"""))
+            }
+
+            if (firstNonAlbumRun != null) {
+                return@runCatching listOf(
+                    YtmArtist(
+                        id = menuArtistId ?: firstNonAlbumRun.navigationEndpoint?.browseEndpoint?.browseId ?: "artist-$videoId",
+                        name = firstNonAlbumRun.text.trim()
                     )
-                }
+                )
             }
 
             return@runCatching null

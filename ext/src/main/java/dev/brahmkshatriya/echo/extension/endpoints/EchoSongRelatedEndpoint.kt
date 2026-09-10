@@ -9,21 +9,25 @@ import io.ktor.client.statement.HttpResponse
 open class EchoSongRelatedEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
     suspend fun loadFromPlaylist(token: String) = runCatching {
-        val response: HttpResponse = api.client.request {
-            endpointPath("browse")
-            url {
-                parameters.append("ctoken", token)
-                parameters.append("continuation", token)
-                parameters.append("type", "next")
+        try {
+            val response: HttpResponse = api.client.request {
+                endpointPath("browse")
+                url {
+                    parameters.append("ctoken", token)
+                    parameters.append("continuation", token)
+                    parameters.append("type", "next")
+                }
+                addApiHeadersWithAuthenticated()
+                postWithBody()
             }
-            addApiHeadersWithAuthenticated()
-            postWithBody()
-        }
 
-        val data: YoutubeiBrowseResponse = response.body()
-        val contents =
-            data.continuationContents?.sectionListContinuation?.contents
-        contents?.let { EchoSongFeedEndpoint.processRows(it, api) } ?: emptyList()
+            val data: YoutubeiBrowseResponse = response.body()
+            val contents = data.continuationContents?.sectionListContinuation?.contents
+            contents?.let { EchoSongFeedEndpoint.processRows(it, api) } ?: emptyList()
+        } catch (e: Exception) {
+            // Handle JSON parsing failures and other errors gracefully
+            emptyList()
+        }
     }
 
 }
