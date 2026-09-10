@@ -183,13 +183,17 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     }
 
     private suspend fun loadRelated(track: Track): List<Shelf> {
-        val relatedId = track.extras["relatedId"]
+        val relatedId = track.extras["relatedId"] ?: run {
+            val loaded = runCatching { loadTrack(track, false) }.getOrNull()
+            loaded?.extras?.get("relatedId")
+        }
         return if (relatedId != null) {
             try {
                 songFeedEndPoint.getSongFeed(browseId = relatedId).getOrThrow().layouts.map {
                     it.toShelf(api, SINGLES, thumbnailQuality)
                 }
             } catch (e: Exception) {
+                println("loadRelated error: ${e.message}")
                 emptyList()
             }
         } else {
@@ -197,14 +201,46 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         }
     }
 
-    override suspend fun loadFeed(track: Track): Feed<Shelf>? {
-        val shelves = loadRelated(track)
-        return if (shelves.isNotEmpty()) {
-            Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
-        } else {
-            null
+    override suspend fun loadFeed(track: Track): Feed<Shelf> = PagedData.Single {
+        val shelves = mutableListOf<Shelf>()
+
+        // 1. YouTube Related endpoint (contains "You might also like", "Recommended playlists", "Similar artists", etc.)
+        val relatedShelves = runCatching { loadRelated(track) }.getOrNull().orEmpty()
+        shelves.addAll(relatedShelves)
+
+        // 2. If no track recommendations were returned in related shelves, add "You might also like" from radio
+        val hasTracks = shelves.any { shelf ->
+            shelf is Shelf.Lists.Tracks || (shelf is Shelf.Lists.Items && shelf.list.any { it is Track })
         }
-    }
+        if (!hasTracks) {
+            val radioTracks = runCatching {
+                components.radioGenerator.getInitialRadioTracks(track.id)
+            }.getOrNull()?.filter { it.id != track.id }.orEmpty()
+            if (radioTracks.isNotEmpty()) {
+                shelves.add(0, Shelf.Lists.Tracks("${track.id}_radio", "You might also like", radioTracks))
+            }
+        }
+
+        // 3. Like Spotify extension: Include the artist's shelves (Albums, Singles, etc.) if not already present
+        val hasArtistReleases = shelves.any { shelf ->
+            val title = shelf.title.lowercase()
+            title.contains("more from") || title.contains("albums") || title.contains("singles") || title.contains("discography")
+        }
+        if (!hasArtistReleases) {
+            val artist = track.artists.firstOrNull()?.takeIf { it.id.isNotBlank() && it.name != "Unknown" }
+                ?: run {
+                    val loaded = runCatching { loadTrack(track, false) }.getOrNull()
+                    loaded?.artists?.firstOrNull()?.takeIf { it.id.isNotBlank() && it.name != "Unknown" }
+                }
+
+            if (artist != null) {
+                val artistShelves = runCatching { getArtistMediaItems(artist) }.getOrNull().orEmpty()
+                shelves.addAll(artistShelves)
+            }
+        }
+
+        shelves
+    }.toFeed()
 
     override suspend fun deleteQuickSearch(item: QuickSearchItem) {
         searchSuggestionsEndpoint.delete(item as QuickSearchItem.Query)
@@ -261,16 +297,31 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     }
 
 
+    private fun cleanPlaylistId(id: String) =
+        if (id.startsWith("VL")) id.substring(2) else id
+
     private val trackMap get() = components.trackCache
     override suspend fun loadAlbum(album: Album): Album {
         val (ytmPlaylist, _, data) = playlistEndPoint.loadFromPlaylist(
-            album.id, null, thumbnailQuality
+            album.id, null, thumbnailQuality, isAlbum = true, fallbackAlbum = album
         )
+        trackMap[album.id] = data
         trackMap[ytmPlaylist.id] = data
-        return ytmPlaylist.toAlbum(false, HIGH)
+        trackMap[cleanPlaylistId(album.id)] = data
+        trackMap[cleanPlaylistId(ytmPlaylist.id)] = data
+        val parsedAlbum = ytmPlaylist.toAlbum(false, HIGH)
+        val resolvedArtists = parsedAlbum.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
+            .ifEmpty { album.artists }
+        return parsedAlbum.copy(artists = resolvedArtists)
     }
 
-    override suspend fun loadTracks(album: Album): Feed<Track>? = trackMap[album.id]?.toFeed()
+    override suspend fun loadTracks(album: Album): Feed<Track>? {
+        val cached = trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)]
+        if (cached != null) return cached.toFeed()
+
+        loadAlbum(album)
+        return (trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)])?.toFeed()
+    }
 
     private suspend fun getArtistMediaItems(artist: Artist): List<Shelf> {
         val result =
@@ -311,9 +362,20 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     private var loadedArtist: YtmArtist? = null
     override suspend fun loadArtist(artist: Artist): Artist {
-        val result = artistEndPoint.loadArtist(artist.id)
-        loadedArtist = result
-        return result.toArtist(HIGH)
+        if (artist.id.isBlank() || artist.id.startsWith("MPREb_") || artist.id.startsWith("OLAK5uy_") || artist.id.startsWith("VL") || artist.id.startsWith("PL")) {
+            return artist
+        }
+        return try {
+            val result = artistEndPoint.loadArtist(artist.id)
+            loadedArtist = result
+            val converted = result.toArtist(HIGH)
+            if ((converted.name.isBlank() || converted.name == "Unknown") && artist.name.isNotBlank() && artist.name != "Unknown") {
+                converted.copy(name = artist.name)
+            } else converted
+        } catch (e: Exception) {
+            println("loadArtist failed for ${artist.id}: ${e.message}")
+            artist
+        }
     }
 
     override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
@@ -354,11 +416,20 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             null,
             thumbnailQuality
         )
+        trackMap[playlist.id] = data
         trackMap[ytmPlaylist.id] = data
+        trackMap[cleanPlaylistId(playlist.id)] = data
+        trackMap[cleanPlaylistId(ytmPlaylist.id)] = data
         return ytmPlaylist.toPlaylist(HIGH, related)
     }
 
-    override suspend fun loadTracks(playlist: Playlist): Feed<Track> = trackMap[playlist.id]?.toFeed() ?: listOf<Track>().toFeed()
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
+        val cached = trackMap[playlist.id] ?: trackMap[cleanPlaylistId(playlist.id)]
+        if (cached != null) return cached.toFeed()
+
+        loadPlaylist(playlist)
+        return (trackMap[playlist.id] ?: trackMap[cleanPlaylistId(playlist.id)])?.toFeed() ?: listOf<Track>().toFeed()
+    }
 
 
     override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {

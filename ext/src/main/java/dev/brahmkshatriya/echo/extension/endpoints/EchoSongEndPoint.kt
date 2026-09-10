@@ -24,7 +24,14 @@ import dev.toastbits.ytmkt.uistrings.parseYoutubeDurationString
 import io.ktor.client.call.body
 import io.ktor.client.request.request
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
@@ -38,68 +45,218 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 put("enablePersistentPlaylistPanel", true)
                 put("isAudioOnly", true)
                 put("videoId", song_id)
+                put("playlistId", "RDAMVM$song_id")
             }
         }
         return@runCatching parseSongResponse(song_id, nextResponse, api).getOrThrow()
     }
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private suspend fun parseSongResponse(
         songId: String,
         response: HttpResponse,
         api: YoutubeiApi
     ) = runCatching {
-        val responseData: YoutubeiNextResponse = response.body()
-        val tabs: List<YoutubeiNextResponse.Tab> =
-            responseData
-                .contents
-                .singleColumnMusicWatchNextResultsRenderer
-                .tabbedRenderer
-                .watchNextTabbedResultsRenderer
-                .tabs
+        val responseText = response.bodyAsText()
+        val root = json.parseToJsonElement(responseText).jsonObject
 
-        val lyricsBrowseId: String? =
-            tabs.getOrNull(1)?.tabRenderer?.endpoint?.browseEndpoint?.browseId
-        val relatedBrowseId: String? =
-            tabs.getOrNull(2)?.tabRenderer?.endpoint?.browseEndpoint?.browseId
+        val contents = root["contents"]?.jsonObject
+        val tabs = contents?.get("singleColumnMusicWatchNextResultsRenderer")
+            ?.jsonObject?.get("tabbedRenderer")
+            ?.jsonObject?.get("watchNextTabbedResultsRenderer")
+            ?.jsonObject?.get("tabs")?.jsonArray
 
-        val video: YoutubeiNextResponse.PlaylistPanelVideoRenderer =
-            tabs[0].tabRenderer.content!!.musicQueueRenderer.content!!.playlistPanelRenderer.contents.first().playlistPanelVideoRenderer!!
+        var lyricsBrowseId: String? = null
+        var relatedBrowseId: String? = null
+        var firstVideoRenderer: JsonObject? = null
 
-        val title: String = video.title.first_text
-        val isLiked =
-            responseData.playerOverlays?.playerOverlayRenderer?.actions?.firstOrNull()?.likeButtonRenderer?.likeStatus == "LIKE"
+        tabs?.forEachIndexed { _, tabElement ->
+            val tabRenderer = tabElement.jsonObject["tabRenderer"]?.jsonObject ?: return@forEachIndexed
+            val browseEndpoint = tabRenderer["endpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+            val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+            val tabTitle = tabRenderer["title"]?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()
+                ?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull?.lowercase()
+                ?: tabRenderer["title"]?.jsonPrimitive?.contentOrNull?.lowercase()
 
-        val artists: List<YtmArtist> = video.getArtists().getOrThrow() ?: emptyList()
-        val album = video.getAlbum()
-        val duration = parseYoutubeDurationString(video.lengthText.first_text, api.data_language)
+            if (tabTitle?.contains("lyric") == true || browseId?.startsWith("MPLY") == true) {
+                if (lyricsBrowseId == null && browseId != null) {
+                    lyricsBrowseId = browseId
+                }
+            }
+            if (tabTitle?.contains("relat") == true || browseId?.startsWith("MPTR") == true || browseId?.startsWith("FEmusic_relat") == true) {
+                if (relatedBrowseId == null && browseId != null) {
+                    relatedBrowseId = browseId
+                }
+            }
 
-        val cover = ThumbnailProvider.fromThumbnails(video.thumbnail.thumbnails)
-            ?.getThumbnailUrl(ThumbnailProvider.Quality.HIGH)?.toImageHolder()
-        return@runCatching Track(
+            if (firstVideoRenderer == null) {
+                val queueRenderer = tabRenderer["content"]?.jsonObject?.get("musicQueueRenderer")?.jsonObject
+                val playlistPanel = queueRenderer?.get("content")?.jsonObject?.get("playlistPanelRenderer")?.jsonObject
+                val contents = playlistPanel?.get("contents")?.jsonArray
+                val firstItem = contents?.firstOrNull()?.jsonObject
+                val video = firstItem?.get("playlistPanelVideoRenderer")?.jsonObject
+                    ?: firstItem?.get("playlistPanelVideoWrapperRenderer")?.jsonObject?.get("primaryRenderer")?.jsonObject?.get("playlistPanelVideoRenderer")?.jsonObject
+                if (video != null) {
+                    firstVideoRenderer = video
+                }
+            }
+        }
+
+        val playerOverlays = root["playerOverlays"]?.jsonObject
+        val actions = playerOverlays?.get("playerOverlayRenderer")?.jsonObject
+            ?.get("actions")?.jsonArray
+        val likeStatus = actions?.firstNotNullOfOrNull { action ->
+            action.jsonObject["likeButtonRenderer"]?.jsonObject
+                ?.get("likeStatus")?.jsonPrimitive?.contentOrNull
+        }
+        val isLiked = likeStatus == "LIKE"
+
+        val video = firstVideoRenderer
+        var title = video?.get("title")?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()
+            ?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull ?: "Unknown"
+
+        val longRuns = video?.get("longBylineText")?.jsonObject?.get("runs")?.jsonArray
+        val shortRuns = video?.get("shortBylineText")?.jsonObject?.get("runs")?.jsonArray
+
+        fun isAlbumOrPlaylist(pageType: String?, browseId: String?): Boolean {
+            return pageType?.contains("ALBUM", ignoreCase = true) == true ||
+                    pageType?.contains("PLAYLIST", ignoreCase = true) == true ||
+                    browseId?.startsWith("MPREb_") == true ||
+                    browseId?.startsWith("OLAK5uy_") == true ||
+                    browseId?.startsWith("VL") == true ||
+                    browseId?.startsWith("PL") == true
+        }
+
+        fun isArtistType(pageType: String?, browseId: String?): Boolean {
+            return pageType?.contains("ARTIST", ignoreCase = true) == true ||
+                    pageType?.contains("USER", ignoreCase = true) == true ||
+                    pageType?.contains("CHANNEL", ignoreCase = true) == true ||
+                    browseId?.startsWith("UC") == true ||
+                    browseId?.startsWith("FE") == true
+        }
+
+        var artists = shortRuns?.mapNotNull { runElement ->
+            val runObj = runElement.jsonObject
+            val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+            if (text.isEmpty() || text == "•" || text == "·" || text == "," || text == "&" || text.matches(Regex("""[•·,&/\s]+"""))) return@mapNotNull null
+            if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true)) return@mapNotNull null
+            val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+            val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+            val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                ?.get("pageType")?.jsonPrimitive?.contentOrNull
+
+            if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
+
+            val resolvedBrowseId = browseId ?: longRuns?.firstNotNullOfOrNull { longEl ->
+                val longObj = longEl.jsonObject
+                if (longObj["text"]?.jsonPrimitive?.contentOrNull?.trim() == text) {
+                    val longEp = longObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+                    val bId = longEp?.get("browseId")?.jsonPrimitive?.contentOrNull
+                    val pType = longEp?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                        ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                        ?.get("pageType")?.jsonPrimitive?.contentOrNull
+                    if (isArtistType(pType, bId)) bId else null
+                } else null
+            } ?: ""
+            YtmArtist(resolvedBrowseId, text)
+        }?.filter { it.name?.isNotBlank() == true && it.name != "Unknown" }.orEmpty()
+
+        if (artists.isEmpty()) {
+            artists = longRuns?.mapNotNull { runElement ->
+                val runObj = runElement.jsonObject
+                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
+                if (text.isEmpty() || text == "•" || text == "·" || text.matches(Regex("""[•·\s]+"""))) return@mapNotNull null
+                if (text.matches(Regex("""\d{4}""")) || text.matches(Regex("""\d{1,2}:\d{2}"""))) return@mapNotNull null
+                if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true) || text.endsWith("plays", ignoreCase = true)) return@mapNotNull null
+                val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+                val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+                val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                    ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                    ?.get("pageType")?.jsonPrimitive?.contentOrNull
+
+                if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
+                if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) return@mapNotNull null
+
+                if (isArtistType(pageType, browseId)) {
+                    YtmArtist(browseId ?: "", text)
+                } else null
+            }?.filter { it.name?.isNotBlank() == true && it.name != "Unknown" }.orEmpty()
+        }
+
+        // Sanitize artists
+        artists = artists.filter {
+            it.name?.isNotBlank() == true &&
+            it.name != "Unknown" &&
+            it.name != "•" &&
+            !it.id.startsWith("MPREb_") &&
+            !it.id.startsWith("OLAK5uy_") &&
+            !it.id.startsWith("VL") &&
+            !it.id.startsWith("PL")
+        }.let { list ->
+            if (list.size > 1) {
+                list.filterNot { it.name.equals(title, ignoreCase = true) && !it.id.startsWith("UC") }
+            } else list
+        }.distinctBy { it.id.ifEmpty { it.name } }
+
+        // Fallback to /player endpoint if title or artists are missing or Unknown
+        if (title == "Unknown" || artists.isEmpty() || artists.all { it.name == "Unknown" }) {
+            val playerData: PlayerData? = runCatching {
+                val playerResponse = api.client.request {
+                    endpointPath("player")
+                    addApiHeadersWithAuthenticated()
+                    postWithBody {
+                        put("videoId", songId)
+                    }
+                }
+                playerResponse.body<PlayerData>()
+            }.getOrNull()
+
+            val details = playerData?.videoDetails
+            if (title == "Unknown" && details?.title != null) {
+                title = details.title
+            }
+            val author = details?.author?.takeIf { it.isNotBlank() && it != "Unknown" }
+            if (author != null && (artists.isEmpty() || artists.all { it.name == "Unknown" })) {
+                val channelId = details.channelId.orEmpty()
+                artists = listOf(YtmArtist(channelId, author))
+            }
+        }
+
+        val lengthText = video?.get("lengthText")?.jsonObject?.get("runs")?.jsonArray
+            ?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull
+        val duration = lengthText?.let { parseYoutubeDurationString(it, api.data_language) }
+
+        val thumbnails = video?.get("thumbnail")?.jsonObject?.get("thumbnails")?.jsonArray
+        val coverUrl = thumbnails?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+        val cover = coverUrl?.toImageHolder()
+
+        Track(
             id = songId,
             title = title,
             cover = cover,
             artists = artists.map { it.toArtist(ThumbnailProvider.Quality.HIGH) },
-            album = album?.toAlbum(false, ThumbnailProvider.Quality.HIGH),
+            album = null,
             duration = duration,
             extras = mutableMapOf<String, String>().apply {
                 relatedBrowseId?.let { put("relatedId", it) }
                 lyricsBrowseId?.let { put("lyricsId", it) }
                 put("isLiked", isLiked.toString())
-            },
-
+            }
         )
     }
 }
 
 @Serializable
 private data class PlayerData(
-    val videoDetails: VideoDetails?,
+    val videoDetails: VideoDetails? = null,
 ) {
     @Serializable
-    class VideoDetails(
-        val title: String,
-        val channelId: String,
+    data class VideoDetails(
+        val title: String? = null,
+        val author: String? = null,
+        val channelId: String? = null,
     )
 }
 
@@ -216,7 +373,7 @@ data class YoutubeiNextResponse(
     class TabRendererEndpoint(val browseEndpoint: BrowseEndpoint)
 
     @Serializable
-    class Content(val musicQueueRenderer: MusicQueueRenderer)
+    class Content(val musicQueueRenderer: MusicQueueRenderer? = null)
 
     @Serializable
     class MusicQueueRenderer(

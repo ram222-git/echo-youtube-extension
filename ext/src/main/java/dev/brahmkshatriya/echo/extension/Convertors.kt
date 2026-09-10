@@ -192,7 +192,19 @@ fun YtmPlaylist.toAlbum(
             title = name ?: "Unknown",
             isExplicit = bool.firstOrNull() ?: false,
             cover = thumbnail_provider?.getThumbnailUrl(quality)?.toImageHolder(mapOf()),
-            artists = artists?.map { it.toArtist(quality) } ?: emptyList(),
+            artists = artists
+                ?.filter {
+                    !it.name.isNullOrBlank() &&
+                    it.name != "Unknown" &&
+                    it.name != "•" &&
+                    !it.id.startsWith("MPREb_") &&
+                    !it.id.startsWith("OLAK5uy_") &&
+                    !it.id.startsWith("VL") &&
+                    !it.id.startsWith("PL")
+                }
+                ?.map { it.toArtist(quality) }
+                ?.distinctBy { it.id.ifEmpty { it.name } }
+                ?: emptyList(),
             trackCount = item_count?.toLong() ?: if (single) 1L else null,
             releaseDate = year?.let { yearStr -> 
                 parseYearString(yearStr)
@@ -220,10 +232,11 @@ fun YtmPlaylist.toAlbum(
 
 fun YtmSong.toTrack(
     quality: ThumbnailProvider.Quality,
-    setId: String? = null
+    setId: String? = null,
+    albumFallback: Album? = null
 ): Track {
     return try {
-        val album = album?.toAlbum(false, quality)
+        val resolvedAlbum = album?.toAlbum(false, quality) ?: albumFallback
         val extras = mutableMapOf<String, String>()
         setId?.let { extras["setId"] = it }
         
@@ -232,10 +245,36 @@ fun YtmSong.toTrack(
         val playableStatus = Track.Playable.Yes
         
         val resolvedArtists = artists
-            ?.filter { !it.name.isNullOrBlank() && it.name != "Unknown" && it.name != "•" }
+            ?.filter { 
+                !it.name.isNullOrBlank() && 
+                it.name != "Unknown" && 
+                it.name != "•" &&
+                !it.id.startsWith("MPREb_") &&
+                !it.id.startsWith("OLAK5uy_") &&
+                !it.id.startsWith("VL") &&
+                !it.id.startsWith("PL")
+            }
             ?.map { it.toArtist(quality) }
+            ?.let { list ->
+                if (list.size > 1 && !name.isNullOrBlank()) {
+                    list.filterNot { it.name.equals(name, ignoreCase = true) && !it.id.startsWith("UC") }
+                } else list
+            }
+            ?.distinctBy { it.id.ifEmpty { it.name } }
             ?.ifEmpty { null }
-            ?: album?.artists?.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }?.ifEmpty { null }
+            ?: resolvedAlbum?.artists?.filter { 
+                it.name.isNotBlank() && 
+                it.name != "Unknown" && 
+                it.name != "•" &&
+                !it.id.startsWith("MPREb_") &&
+                !it.id.startsWith("OLAK5uy_") &&
+                !it.id.startsWith("VL") &&
+                !it.id.startsWith("PL")
+            }?.let { list ->
+                if (list.size > 1 && !name.isNullOrBlank()) {
+                    list.filterNot { it.name.equals(name, ignoreCase = true) && !it.id.startsWith("UC") }
+                } else list
+            }?.distinctBy { it.id.ifEmpty { it.name } }?.ifEmpty { null }
             ?: emptyList()
 
         Track(
@@ -244,11 +283,12 @@ fun YtmSong.toTrack(
             type = trackType,
             artists = resolvedArtists,
             cover = thumbnail_provider?.getThumbnailUrl(quality)?.toImageHolder(crop = true)
+                ?: resolvedAlbum?.cover
                 ?: getCover(id, quality),
-            album = album,
+            album = resolvedAlbum,
             duration = duration?.toLong(),
             plays = null,  
-            releaseDate = album?.releaseDate,
+            releaseDate = resolvedAlbum?.releaseDate,
             isExplicit = is_explicit,
             isPlayable = playableStatus,
             isRadioSupported = true,
@@ -270,13 +310,13 @@ fun YtmSong.toTrack(
             id = id,
             title = name ?: "Unknown Track",
             type = Track.Type.Song,
-            artists = emptyList(),
-            cover = getCover(id, quality),
-            album = null,
-            duration = null,
+            artists = albumFallback?.artists ?: emptyList(),
+            cover = albumFallback?.cover ?: getCover(id, quality),
+            album = albumFallback,
+            duration = duration?.toLong(),
             plays = null,
-            releaseDate = null,
-            isExplicit = false,
+            releaseDate = albumFallback?.releaseDate,
+            isExplicit = is_explicit,
             isPlayable = Track.Playable.Yes,
             isRadioSupported = true,
             isFollowable = false,
@@ -284,7 +324,14 @@ fun YtmSong.toTrack(
             isLikeable = true,
             isHideable = true,
             isShareable = true,
-            extras = mapOf("videoId" to id, "availability" to "public", "trackType" to "SONG")
+            streamables = dev.brahmkshatriya.echo.extension.endpoints.EchoEnhancedSongEndpoint.createDefaultStreamables(id),
+            extras = mutableMapOf(
+                "videoId" to id,
+                "availability" to "public",
+                "trackType" to Track.Type.Song.name
+            ).apply {
+                setId?.let { put("setId", it) }
+            }
         )
     }
 }

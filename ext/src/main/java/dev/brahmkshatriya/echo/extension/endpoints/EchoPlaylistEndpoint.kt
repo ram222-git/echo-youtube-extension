@@ -2,8 +2,10 @@ package dev.brahmkshatriya.echo.extension.endpoints
 
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.YoutubeExtension.Companion.SONGS
+import dev.brahmkshatriya.echo.extension.toAlbum
 import dev.brahmkshatriya.echo.extension.toTrack
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiPostBody
@@ -30,14 +32,12 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         if (!browseId.startsWith("VL") && !browseId.startsWith("MPREb_")) "VL$browseId"
         else browseId
 
-    private fun cleanId(playlistId: String) =
-        if (playlistId.startsWith("VL")) playlistId.substring(2)
-        else playlistId
-
     suspend fun loadFromPlaylist(
         playlistId: String,
         params: String? = null,
-        quality: ThumbnailProvider.Quality
+        quality: ThumbnailProvider.Quality,
+        isAlbum: Boolean = false,
+        fallbackAlbum: Album? = null
     ): Triple<YtmPlaylist, String?, PagedData<Track>> = run {
 
         val endpoint = if (!playlistId.startsWith("MPREb_"))
@@ -69,19 +69,60 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         }
         val (playlist, relation) =
             parsePlaylistResponse(cleanId(id), res, api.data_language, api)
+
+        val isAlbumType = isAlbum ||
+            fallbackAlbum != null ||
+            id.startsWith("MPREb_") ||
+            cleanId(id).startsWith("MPREb_") ||
+            playlistId.startsWith("MPREb_") ||
+            endpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType == "MUSIC_PAGE_TYPE_ALBUM" ||
+            playlist.type == YtmPlaylist.Type.ALBUM
+
+        val resolvedAlbum = if (isAlbumType) {
+            val parsed = playlist.toAlbum(false, quality)
+            val validArtists = parsed.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
+                .ifEmpty {
+                    fallbackAlbum?.artists?.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" } ?: emptyList()
+                }
+            parsed.copy(
+                artists = validArtists.ifEmpty { parsed.artists },
+                cover = parsed.cover ?: fallbackAlbum?.cover,
+                title = if (parsed.title.isBlank() || parsed.title == "Unknown") fallbackAlbum?.title ?: parsed.title else parsed.title
+            )
+        } else null
+
+        val albumArtists = resolvedAlbum?.artists.orEmpty()
+
         val songs = PagedData.Continuous { token ->
             if (token == null) {
                 val ytmSongs = playlist.items ?: emptyList()
-                val sets = playlist.item_set_ids!!
+                val sets = playlist.item_set_ids ?: emptyList()
                 Page(
-                    ytmSongs.mapIndexed { index, it -> it.toTrack(quality, sets[index]) },
+                    ytmSongs.mapIndexed { index, it ->
+                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            track.copy(artists = albumArtists)
+                        } else {
+                            track
+                        }
+                    },
                     playlist.continuation?.token
                 )
             } else {
                 val (songs, setIds, cont) = continuationEndpoint.load(token)
                 val ytmSongs = songs ?: emptyList()
                 val sets = setIds ?: emptyList()
-                Page(ytmSongs.mapIndexed { index, it -> it.toTrack(quality, sets[index]) }, cont)
+                Page(
+                    ytmSongs.mapIndexed { index, it ->
+                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            track.copy(artists = albumArtists)
+                        } else {
+                            track
+                        }
+                    },
+                    cont
+                )
             }
         }
         Triple(playlist, relation, songs)
@@ -117,6 +158,10 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
     }
 
     companion object {
+        fun cleanId(playlistId: String) =
+            if (playlistId.startsWith("VL")) playlistId.substring(2)
+            else playlistId
+
         private val regex = Regex("(\\d+) $SONGS")
         fun List<TextRun>.findSongCount(): Int? {
             val count = this.firstOrNull { it.text.contains(SONGS) }?.text ?: return null
@@ -153,6 +198,8 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 builder.item_count = playlistData.count
                 builder.total_duration = playlistData.duration
             }
+
+            builder.type = if (cleanId(playlistId).startsWith("MPREb_") || playlistId.startsWith("MPREb_")) YtmPlaylist.Type.ALBUM else YtmPlaylist.Type.PLAYLIST
 
             val sectionListRenderer = parsed.contents?.run {
                 singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer

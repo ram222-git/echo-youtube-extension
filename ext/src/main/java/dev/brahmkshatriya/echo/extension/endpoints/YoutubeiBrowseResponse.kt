@@ -177,10 +177,20 @@ data class YoutubeiBrowseResponse(
                 val name = model.rendererContext.accessibilityContext?.label ?: "Unknown"
                 YtmArtist(url, name)
             }?.let { listOf(it) }
-            val artists = straplineTextOne?.runs?.mapNotNull {
-                val id = it.navigationEndpoint?.browseEndpoint?.browseId ?: return@mapNotNull null
-                YtmArtist(id, it.text)
+            val straplineArtists = straplineTextOne?.runs?.mapNotNull {
+                val text = it.text?.trim().orEmpty()
+                if (text.isBlank() || text == "," || text == "&" || text == "•") return@mapNotNull null
+                val id = it.navigationEndpoint?.browseEndpoint?.browseId ?: "artist_$text"
+                YtmArtist(id, text)
             } ?: emptyList()
+            val subtitleArtists = subtitle?.runs?.mapNotNull {
+                val text = it.text?.trim().orEmpty()
+                val isArtist = it.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType == "MUSIC_PAGE_TYPE_ARTIST"
+                if (!isArtist || text.isBlank() || text == "," || text == "&" || text == "•") return@mapNotNull null
+                val id = it.navigationEndpoint?.browseEndpoint?.browseId ?: "artist_$text"
+                YtmArtist(id, text)
+            } ?: emptyList()
+            val allArtists = if (straplineArtists.isNotEmpty()) straplineArtists else subtitleArtists
             val isExplicit =
                 subtitleBadge?.any { it.musicInlineBadgeRenderer?.icon?.iconType == "MUSIC_EXPLICIT_BADGE" }
                     ?: false
@@ -188,7 +198,7 @@ data class YoutubeiBrowseResponse(
                 title = title,
                 description = description,
                 thumbnail = thumbnail,
-                artists = artist ?: artists,
+                artists = if (allArtists.isNotEmpty()) allArtists else (artist ?: emptyList()),
                 year = year,
                 explicit = isExplicit,
                 isEditable = isEditable,

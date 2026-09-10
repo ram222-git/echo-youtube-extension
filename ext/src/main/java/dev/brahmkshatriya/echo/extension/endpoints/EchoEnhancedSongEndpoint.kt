@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.extension.endpoints
 
+import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.toTrack
@@ -123,20 +124,38 @@ class EchoEnhancedSongEndpoint(
             cover = ytmTrack.cover ?: fallbackTrack.cover ?: legacyTrack?.cover,
             album = ytmTrack.album ?: legacyTrack?.album,
             artists = run {
-                val ytmValid = ytmTrack.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
-                val fallbackValid = fallbackTrack.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
-                val legacyValid = legacyTrack?.artists?.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" } ?: emptyList()
+                val ytmValid = sanitizeArtists(ytmTrack.artists, ytmTrack.title)
+                val legacyValid = sanitizeArtists(legacyTrack?.artists.orEmpty(), ytmTrack.title)
+                val fallbackValid = sanitizeArtists(fallbackTrack.artists, ytmTrack.title)
 
                 when {
                     ytmValid.isNotEmpty() -> ytmValid
-                    fallbackValid.isNotEmpty() -> fallbackValid
                     legacyValid.isNotEmpty() -> legacyValid
-                    else -> fallbackTrack.artists.ifEmpty { legacyTrack?.artists ?: ytmTrack.artists }
+                    fallbackValid.isNotEmpty() -> fallbackValid
+                    else -> sanitizeArtists(fallbackTrack.artists.ifEmpty { legacyTrack?.artists ?: ytmTrack.artists }, ytmTrack.title).ifEmpty {
+                        listOf(Artist(id = "", name = "Unknown"))
+                    }
                 }
             },
             streamables = streamables,
             extras = mergedExtras
         )
+    }
+
+    private fun sanitizeArtists(artists: List<Artist>, trackTitle: String): List<Artist> {
+        return artists.filter {
+            it.name.isNotBlank() &&
+            it.name != "Unknown" &&
+            it.name != "•" &&
+            !it.id.startsWith("MPREb_") &&
+            !it.id.startsWith("OLAK5uy_") &&
+            !it.id.startsWith("VL") &&
+            !it.id.startsWith("PL")
+        }.let { list ->
+            if (list.size > 1) {
+                list.filterNot { it.name.equals(trackTitle, ignoreCase = true) && !it.id.startsWith("UC") }
+            } else list
+        }.distinctBy { it.id.ifEmpty { it.name } }
     }
 
     private fun mergeWithLegacyPriority(
@@ -146,8 +165,8 @@ class EchoEnhancedSongEndpoint(
         enableVideo: Boolean = true,
         preferVideos: Boolean = false
     ): Track {
-        val legacyValid = legacyTrack.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
-        val fallbackValid = fallbackTrack.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
+        val legacyValid = sanitizeArtists(legacyTrack.artists, legacyTrack.title)
+        val fallbackValid = sanitizeArtists(fallbackTrack.artists, legacyTrack.title)
         val finalArtists = if (legacyValid.isNotEmpty()) legacyValid else fallbackValid.ifEmpty { legacyTrack.artists }
 
         return legacyTrack.copy(
