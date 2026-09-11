@@ -612,25 +612,47 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
         val pagedData = PagedData.Single {
-            val lyricsId = track.extras["lyricsId"] ?: run {
-                components.songEndpoint.loadSong(track.id).getOrNull()?.extras?.get("lyricsId")
-            } ?: return@Single listOf()
-            val data = lyricsEndPoint.getLyrics(lyricsId) ?: return@Single listOf()
-            val lyrics = data.first.map {
-                it.cueRange.run {
-                    Lyrics.Item(
-                        it.lyricLine,
-                        startTimeMilliseconds.toLong(),
-                        endTimeMilliseconds.toLong()
-                    )
+            var lyricsId = track.extras["lyricsId"]
+            var durationMs = track.duration
+            var artists = track.artists
+
+            if (lyricsId == null || durationMs == null || artists.isEmpty()) {
+                val loadedSong = components.songEndpoint.loadSong(track.id).getOrNull()
+                if (lyricsId == null) {
+                    lyricsId = loadedSong?.extras?.get("lyricsId")
+                }
+                if (durationMs == null) {
+                    durationMs = loadedSong?.duration
+                }
+                if (artists.isEmpty() && !loadedSong?.artists.isNullOrEmpty()) {
+                    artists = loadedSong.artists
                 }
             }
-            listOf(Lyrics(lyricsId, track.title, data.second, Lyrics.Timed(lyrics)))
+
+            val primaryArtist = artists.firstOrNull()?.name
+            val parsed = lyricsEndPoint.getLyrics(
+                id = lyricsId,
+                title = track.title,
+                artist = primaryArtist,
+                durationMs = durationMs
+            ) ?: return@Single listOf()
+            listOf(Lyrics(lyricsId ?: track.id, track.title, parsed.source, parsed.lyric))
         }
         return pagedData.toFeed()
     }
 
-    override suspend fun loadLyrics(lyrics: Lyrics) = lyrics
+    override suspend fun loadLyrics(lyrics: Lyrics): Lyrics {
+        if (lyrics.lyrics != null) return lyrics
+        val parsed = lyricsEndPoint.getLyrics(
+            id = lyrics.id,
+            title = lyrics.title,
+            artist = lyrics.subtitle
+        ) ?: return lyrics
+        return lyrics.copy(
+            subtitle = parsed.source ?: lyrics.subtitle,
+            lyrics = parsed.lyric
+        )
+    }
 
     override suspend fun onShare(item: EchoMediaItem) = components.shareManager.getShareUrl(item)
     
@@ -671,6 +693,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     }
     
     override suspend fun searchLyrics(query: String): Feed<Lyrics> {
-        return listOf<Lyrics>().toFeed()
+        val pagedData = PagedData.Single {
+            lyricsEndPoint.searchLyrics(query)
+        }
+        return pagedData.toFeed()
     }
 }

@@ -75,16 +75,17 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val tabRenderer = tabElement.jsonObject["tabRenderer"]?.jsonObject ?: return@forEachIndexed
             val browseEndpoint = tabRenderer["endpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
             val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
-            val tabTitle = tabRenderer["title"]?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()
-                ?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull?.lowercase()
-                ?: tabRenderer["title"]?.jsonPrimitive?.contentOrNull?.lowercase()
 
-            if (tabTitle?.contains("lyric") == true || browseId?.startsWith("MPLY") == true) {
+            val titleElem = tabRenderer["title"]
+            val tabTitle = (runCatching { titleElem?.jsonPrimitive?.contentOrNull }.getOrNull()
+                ?: runCatching { titleElem?.jsonObject?.get("runs")?.jsonArray?.firstOrNull()?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull }.getOrNull())?.lowercase()
+
+            if (browseId?.startsWith("MPLY") == true || tabTitle?.contains("lyric") == true) {
                 if (lyricsBrowseId == null && browseId != null) {
                     lyricsBrowseId = browseId
                 }
             }
-            if (tabTitle?.contains("relat") == true || browseId?.startsWith("MPTR") == true || browseId?.startsWith("FEmusic_relat") == true) {
+            if (browseId?.startsWith("MPTR") == true || browseId?.startsWith("FEmusic_relat") == true || tabTitle?.contains("relat") == true) {
                 if (relatedBrowseId == null && browseId != null) {
                     relatedBrowseId = browseId
                 }
