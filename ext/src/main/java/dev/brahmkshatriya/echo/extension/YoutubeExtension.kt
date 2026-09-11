@@ -102,6 +102,12 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "enable_video",
             "Show video playback and video background options in Quality Selection. Turn off to show only audio qualities.",
             false
+        ),
+        SettingSwitch(
+            "Send Listening Data to Google",
+            "send_back_to_google",
+            "Upload listening history to YouTube Music to improve recommendations and stats (works when logged in).",
+            true
         )
     )
 
@@ -536,16 +542,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     override suspend fun getMarkAsPlayedDuration(details: TrackDetails): Long? = 30000L
 
     override suspend fun onMarkAsPlayed(details: TrackDetails) {
-        val authState = api.user_auth_state ?: return
-        val endpoint = authState.MarkSongAsWatched ?: return
-        try {
-            val result = endpoint.markSongAsWatched(details.track.id)
-            if (result.isFailure) {
-                println("MarkSongAsWatched failed ${result.exceptionOrNull()?.message}")
-            }
-        } catch (e: Exception) {
-            println("MarkSongAsWatched threw ${e.message}")
-        }
+        components.playbackTracker.markWatched(details.track.id, components.sendBackToGoogle)
     }
 
     // Keep this helper for backward compatibility with remaining code
@@ -651,7 +648,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         return NetworkRequest(url = this)
     }
     
-    override suspend fun onTrackChanged(details: TrackDetails?) {}
+    override suspend fun onTrackChanged(details: TrackDetails?) {
+        components.playbackTracker.startTracking(details?.track, components.sendBackToGoogle)
+    }
     
     override suspend fun onPlayingStateChanged(details: TrackDetails?, isPlaying: Boolean) {}
     

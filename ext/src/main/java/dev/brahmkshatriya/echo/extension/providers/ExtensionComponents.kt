@@ -8,6 +8,7 @@ import dev.brahmkshatriya.echo.extension.auth.YouTubeAuthManager
 import dev.brahmkshatriya.echo.extension.endpoints.*
 import dev.brahmkshatriya.echo.extension.providers.feeds.LibraryFeedProvider
 import dev.brahmkshatriya.echo.extension.providers.feeds.SearchFeedProvider
+import dev.brahmkshatriya.echo.extension.providers.playback.PlaybackTracker
 import dev.brahmkshatriya.echo.extension.providers.playback.RadioGenerator
 import dev.brahmkshatriya.echo.extension.providers.playback.TrackLoader
 import dev.brahmkshatriya.echo.extension.providers.playlists.PlaylistManager
@@ -38,6 +39,9 @@ class ExtensionComponents(
 
     val enableVideo: Boolean
         get() = settings.getBoolean("enable_video") ?: false
+
+    val sendBackToGoogle: Boolean
+        get() = settings.getBoolean("send_back_to_google") ?: true
 
     //Endpoints (API Communication)
     
@@ -89,6 +93,10 @@ class ExtensionComponents(
 
     val radioGenerator by lazy {
         RadioGenerator(api, json, thumbnailQuality, trackCache)
+    }
+
+    val playbackTracker by lazy {
+        PlaybackTracker(api, authManager, json)
     }
 
     val playlistManager by lazy {
