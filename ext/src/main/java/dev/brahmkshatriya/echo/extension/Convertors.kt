@@ -44,20 +44,26 @@ suspend fun MediaItemLayout.toShelf(
     quality: ThumbnailProvider.Quality
 ): Shelf {
     val single = title?.getString(ENGLISH) == SINGLES
+    val shelfTitle = title?.getString(language)
+        ?: title?.getString(api.data_language)
+        ?: title?.getString(ENGLISH)
+        ?: "Unknown"
+    val shelfSubtitle = subtitle?.getString(language)
+        ?: subtitle?.getString(api.data_language)
+        ?: subtitle?.getString(ENGLISH)
+
     return try {
-        Shelf.Lists.Items(
-            id = title?.getString(language)?.hashCode()?.toString() ?: "Unknown",
-            title = title?.getString(language) ?: "Unknown",
-            subtitle = subtitle?.getString(language),
-            list = items.mapNotNull { item ->
-                try {
-                    item.toEchoMediaItem(single, quality)
-                } catch (e: Exception) {
-                    println("Failed to convert media item in shelf: ${e.message}")
-                    null
-                }
-            },
-            more = view_more?.getBrowseParamsData()?.browse_id?.let { id ->
+        val convertedItems = items.mapNotNull { item ->
+            try {
+                item.toEchoMediaItem(single, quality)
+            } catch (e: Exception) {
+                println("Failed to convert media item in shelf: ${e.message}")
+                null
+            }
+        }
+
+        val shelfId = shelfTitle.hashCode().toString()
+        val moreData = view_more?.getBrowseParamsData()?.browse_id?.let { id ->
                 if (id.startsWith("FEmusic_")) {
                     println("Skipping view more for special browse_id: $id")
                     return@let null
@@ -103,7 +109,22 @@ suspend fun MediaItemLayout.toShelf(
                     })
                 }
             }
-        )
+
+        if (convertedItems.isNotEmpty() && convertedItems.all { it is Track }) {
+            Shelf.Lists.Tracks(
+                id = shelfId,
+                title = shelfTitle,
+                list = convertedItems.filterIsInstance<Track>()
+            )
+        } else {
+            Shelf.Lists.Items(
+                id = shelfId,
+                title = shelfTitle,
+                subtitle = shelfSubtitle,
+                list = convertedItems,
+                more = moreData
+            )
+        }
     } catch (e: Exception) {
         println("Failed to create shelf: ${e.message}")
         Shelf.Lists.Items(

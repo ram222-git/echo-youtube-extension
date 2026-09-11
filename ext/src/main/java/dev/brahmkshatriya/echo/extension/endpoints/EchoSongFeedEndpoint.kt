@@ -92,17 +92,19 @@ open class EchoSongFeedEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         ): List<MediaItemLayout> {
             val hl = api.data_language
             fun String.createUiString() =
-                YoutubeUiString.Type.HOME_FEED.createFromKey(this, api.data_language)
+                YoutubeUiString.Type.HOME_FEED.createFromKey(this, api.data_language) ?: RawUiString(this)
 
             return rows.mapNotNull { row ->
                 val items = row.getMediaItems(hl, api) ?: return@mapNotNull null
-                val default = MediaItemLayout(items, "".createUiString(), null, null, null)
+                val rowTitleText = row.title?.text ?: ""
+                val default = MediaItemLayout(items, rowTitleText.createUiString(), null, null, null)
                 when (val renderer = row.getRenderer()) {
                     is YoutubeiBrowseResponse.YoutubeiShelf.MusicShelfRenderer -> {
                         val mediaItem = renderer.bottomEndpoint?.getMediaItem()
+                        val titleStr = (renderer.title?.first_text ?: rowTitleText).ifBlank { "Quick picks" }
                         MediaItemLayout(
                             items,
-                            (renderer.title?.first_text ?: "").createUiString(),
+                            titleStr.createUiString(),
                             null,
                             null,
                             mediaItem?.let { renderer.bottomEndpoint.getViewMore(it) }
@@ -110,16 +112,17 @@ open class EchoSongFeedEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                     }
 
                     is YoutubeiHeaderContainer -> {
-                        val header = renderer.header?.header_renderer ?: return@mapNotNull default
-                        val titleTextRun = header.title ?: return@mapNotNull default
+                        val header = renderer.header?.header_renderer
+                        val titleTextRun = header?.title
                         val browseEndpoint =
-                            titleTextRun.runs?.first()?.navigationEndpoint?.browseEndpoint
+                            titleTextRun?.runs?.firstOrNull()?.navigationEndpoint?.browseEndpoint
                         val browseId = browseEndpoint?.browseId
                         val pageType = browseEndpoint?.browseEndpointContextSupportedConfigs
                             ?.browseEndpointContextMusicConfig?.pageType
-                        val title = titleTextRun.first_text.createUiString()
+                        val rawTitle = titleTextRun?.first_text?.takeIf { it.isNotBlank() } ?: rowTitleText
+                        val title = rawTitle.createUiString()
 
-                        val subtitle = (header.subtitle ?: header.strapline)?.first_text?.let {
+                        val subtitle = (header?.subtitle ?: header?.strapline)?.first_text?.let {
                             RawUiString(
                                 it.lowercase().replaceFirstChar { char -> char.uppercase() })
                         }

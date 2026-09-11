@@ -4,7 +4,6 @@ import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
-import dev.brahmkshatriya.echo.extension.utils.RetryUtils
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.YoutubeVideoFormat
 
@@ -44,14 +43,7 @@ class YouTubeStreamResolver(
         preferVideos: Boolean
     ): Streamable.Media {
         println("Loading streamable media for video ID: $videoId, title: ${streamable?.title}")
-        
-        return RetryUtils.retryWithBackoff(
-            maxRetries = 3,
-            initialDelay = 1000L,
-            maxDelay = 10000L
-        ) {
-            resolveStreamableInternal(streamable, videoId, preferVideos)
-        }
+        return resolveStreamableInternal(streamable, videoId, preferVideos)
     }
 
     suspend fun resolveBackground(videoId: String): Streamable.Media {
@@ -118,7 +110,17 @@ class YouTubeStreamResolver(
 
         val errorReasons = mutableListOf<String>()
         
-        // Tier 1: RealNewPipe
+        // Tier 1: YouTube Music Native API (IOS client) - fastest and direct unthrottled streaming URLs (~250ms)
+        println("YouTube Music API extractor for video ID: $videoId, isVideoRequest: $isVideoRequest")
+        val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest, targetHeight)
+        if (youtubeMusicResult is ExtractionResult.Success) {
+            println("Successfully loaded streamable media using YouTube Music API in record time")
+            return youtubeMusicResult.media
+        } else if (youtubeMusicResult is ExtractionResult.Error) {
+            errorReasons.add("YouTube Music API: ${youtubeMusicResult.reason}")
+        }
+
+        // Tier 2: RealNewPipe
         println("RealNewPipe extractor for video ID: $videoId, isVideoRequest: $isVideoRequest")
         val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest, targetHeight, targetCodec, targetBitrate)
         if (realNewPipeResult is ExtractionResult.Success) {
@@ -128,7 +130,7 @@ class YouTubeStreamResolver(
             errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
         }
         
-        // Tier 2: YtmKt MultipleVideoFormatsEndpoint
+        // Tier 3: YtmKt MultipleVideoFormatsEndpoint
         println("RealNewPipe failed, trying YtmKt for video ID: $videoId")
         val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest, targetHeight, targetCodec, targetBitrate)
         if (ytmKtResult is ExtractionResult.Success) {
@@ -136,16 +138,6 @@ class YouTubeStreamResolver(
             return ytmKtResult.media
         } else if (ytmKtResult is ExtractionResult.Error) {
             errorReasons.add("YtmKt: ${ytmKtResult.reason}")
-        }
-        
-        // Tier 3: YouTube Music API
-        println("YtmKt failed, trying YouTube Music API for video ID: $videoId")
-        val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest)
-        if (youtubeMusicResult is ExtractionResult.Success) {
-            println("Successfully loaded streamable media using YouTube Music API")
-            return youtubeMusicResult.media
-        } else if (youtubeMusicResult is ExtractionResult.Error) {
-            errorReasons.add("YouTube Music API: ${youtubeMusicResult.reason}")
         }
         
         val detailedError = if (errorReasons.isNotEmpty()) {
@@ -188,34 +180,30 @@ class YouTubeStreamResolver(
             if (isVideoRequest) {
                 val reqHeight = targetHeight ?: maxVideoQuality
 
-                val muxedResult = getRealNewPipe().getMuxedVideoStreams(videoId)
-                val allMuxed = muxedResult.getOrNull() ?: emptyList()
+                // Single StreamInfo.getInfo call — get muxed + video-only + audio at once
+                val allResult = getRealNewPipe().getAllStreams(videoId)
+                if (allResult.isSuccess) {
+                    val (allMuxed, videoFormats, audioFormats) = allResult.getOrThrow()
 
-                val matchingMuxed = allMuxed.firstOrNull { format ->
-                    val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    h == reqHeight
-                } ?: if (targetHeight == null) allMuxed.firstOrNull() else null
+                    val matchingMuxed = allMuxed.firstOrNull { format ->
+                        val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                        h == reqHeight
+                    } ?: if (targetHeight == null) allMuxed.firstOrNull() else null
 
-                if (matchingMuxed?.url != null) {
-                    val muxedSource = Streamable.Source.Http(
-                        request = createStreamingRequest(matchingMuxed.url!!),
-                        type = Streamable.SourceType.Progressive,
-                        quality = if (matchingMuxed.bitrate > 0) matchingMuxed.bitrate / 1000 else 0,
-                        title = cleanVideoTitle(matchingMuxed, reqHeight)
-                    )
-                    return ExtractionResult.Success(Streamable.Media.Server(listOf(muxedSource), merged = false))
-                }
+                    if (matchingMuxed?.url != null) {
+                        val muxedSource = Streamable.Source.Http(
+                            request = createStreamingRequest(matchingMuxed.url!!),
+                            type = Streamable.SourceType.Progressive,
+                            quality = if (matchingMuxed.bitrate > 0) matchingMuxed.bitrate / 1000 else 0,
+                            title = cleanVideoTitle(matchingMuxed, reqHeight)
+                        )
+                        return ExtractionResult.Success(Streamable.Media.Server(listOf(muxedSource), merged = false))
+                    }
 
-                // If not found in muxed or higher quality (1080p, 480p), fetch separate video + audio
-                val separateResult = getRealNewPipe().getSeparateStreams(videoId, maxQuality = null)
-                if (separateResult.isSuccess) {
-                    val (videoFormats, audioFormats) = separateResult.getOrThrow()
-                    
                     val selectedVideo = videoFormats.minByOrNull { format ->
                         val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                         Math.abs(h - reqHeight)
                     } ?: videoFormats.firstOrNull()
-
                     val bestAudio = audioFormats.firstOrNull()
 
                     if (selectedVideo?.url != null && bestAudio?.url != null) {
@@ -238,12 +226,12 @@ class YouTubeStreamResolver(
 
             // Audio extraction (or fallback if video failed)
             println("RealNewPipe: Extracting audio streams for $videoId")
-            val streamsResult = getRealNewPipe().getSeparateStreams(videoId, maxQuality = null)
-            if (streamsResult.isFailure) {
+            val audioResult = getRealNewPipe().getAudioFormats(videoId)
+            if (audioResult.isFailure) {
                 return ExtractionResult.Failed
             }
 
-            val (_, rawAudioFormats) = streamsResult.getOrThrow()
+            val rawAudioFormats = audioResult.getOrThrow()
             if (rawAudioFormats.isEmpty()) {
                 return ExtractionResult.Failed
             }
@@ -364,7 +352,11 @@ class YouTubeStreamResolver(
         }
     }
 
-    private suspend fun tryYouTubeMusicApi(videoId: String, preferVideos: Boolean): ExtractionResult {
+    private suspend fun tryYouTubeMusicApi(
+        videoId: String,
+        isVideoRequest: Boolean,
+        targetHeight: Int? = null
+    ): ExtractionResult {
         return try {
             try {
                 if (api.visitor_id == null) {
@@ -374,10 +366,43 @@ class YouTubeStreamResolver(
                 println("Exception ensuring visitor ID: ${e.message}")
             }
 
-            val (video, _) = videoEndpoint.getVideo(true, videoId)
+            // resolve=false avoids the redundant web remix request, cutting network latency in half
+            val (video, _) = videoEndpoint.getVideo(false, videoId)
             val streamingData = video.streamingData ?: return ExtractionResult.Error("No streaming data")
             val adaptiveFormats = streamingData.adaptiveFormats
 
+            if (isVideoRequest) {
+                val videoFormats = adaptiveFormats.filter {
+                    it.mimeType.lowercase().contains("video/") && it.url != null
+                }
+                val audioFormats = adaptiveFormats.filter {
+                    it.mimeType.lowercase().contains("audio/") && it.url != null
+                }
+                val reqHeight = targetHeight ?: maxVideoQuality
+                val selectedVideo = videoFormats.minByOrNull {
+                    Math.abs((it.height?.toInt() ?: 0) - reqHeight)
+                } ?: videoFormats.firstOrNull()
+                val bestAudio = audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.firstOrNull()
+
+                if (selectedVideo?.url != null && bestAudio?.url != null) {
+                    val videoSource = Streamable.Source.Http(
+                        request = createStreamingRequest(selectedVideo.url!!),
+                        type = Streamable.SourceType.Progressive,
+                        quality = (selectedVideo.height?.toInt() ?: reqHeight),
+                        title = "Video ${selectedVideo.height ?: reqHeight}p"
+                    )
+                    val audioBitrate = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 128
+                    val audioSource = Streamable.Source.Http(
+                        request = createStreamingRequest(bestAudio.url!!),
+                        type = Streamable.SourceType.Progressive,
+                        quality = audioBitrate,
+                        title = "Audio $audioBitrate kbps"
+                    )
+                    return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
+                }
+            }
+
+            // Audio extraction (or fallback if video not available)
             val audioFormats = adaptiveFormats.filter {
                 it.mimeType.lowercase().contains("audio/") && it.url != null
             }
@@ -385,7 +410,7 @@ class YouTubeStreamResolver(
                 return ExtractionResult.Error("No audio formats")
             }
 
-            val selectedFormat = audioFormats.first()
+            val selectedFormat = audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.first()
             val bitrateKbps = if (selectedFormat.bitrate > 0) selectedFormat.bitrate / 1000 else 128
             val singleSource = Streamable.Source.Http(
                 request = createStreamingRequest(selectedFormat.url!!),

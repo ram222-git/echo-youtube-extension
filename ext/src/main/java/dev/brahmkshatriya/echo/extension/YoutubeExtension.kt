@@ -160,7 +160,20 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                     params = tab?.id, continuation = continuation
                 ).getOrThrow()
                 val data = result.layouts.map { itemLayout ->
-                    itemLayout.toShelf(api, SINGLES, thumbnailQuality)
+                    itemLayout.toShelf(api, api.data_language, thumbnailQuality)
+                }.let { shelves ->
+                    if (continuation == null) {
+                        shelves.sortedWith(compareBy { shelf ->
+                            val title = shelf.title?.lowercase() ?: ""
+                            val isTrackShelf = shelf is Shelf.Lists.Tracks || (shelf is Shelf.Lists.Items && shelf.list.any { it is Track })
+                            when {
+                                title.contains("quick") && title.contains("pick") -> 0
+                                title.contains("quick") || title.contains("pick") -> 1
+                                isTrackShelf -> 2
+                                else -> 3
+                            }
+                        })
+                    } else shelves
                 }
                 Page(data, result.ctoken)
             }
@@ -190,7 +203,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         return if (relatedId != null) {
             try {
                 songFeedEndPoint.getSongFeed(browseId = relatedId).getOrThrow().layouts.map {
-                    it.toShelf(api, SINGLES, thumbnailQuality)
+                    it.toShelf(api, api.data_language, thumbnailQuality)
                 }
             } catch (e: Exception) {
                 println("loadRelated error: ${e.message}")
@@ -586,7 +599,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
         val pagedData = PagedData.Single {
-            val lyricsId = track.extras["lyricsId"] ?: return@Single listOf()
+            val lyricsId = track.extras["lyricsId"] ?: run {
+                components.songEndpoint.loadSong(track.id).getOrNull()?.extras?.get("lyricsId")
+            } ?: return@Single listOf()
             val data = lyricsEndPoint.getLyrics(lyricsId) ?: return@Single listOf()
             val lyrics = data.first.map {
                 it.cueRange.run {

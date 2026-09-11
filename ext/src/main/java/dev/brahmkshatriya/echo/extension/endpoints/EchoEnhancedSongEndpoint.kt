@@ -31,44 +31,28 @@ class EchoEnhancedSongEndpoint(
         enableVideo: Boolean = true,
         preferVideos: Boolean = false
     ): Track {
-        println("EchoEnhancedSongEndpoint: Loading track $trackId, fallback isVideo=${fallbackTrack.extras["isVideo"]}, enableVideo=$enableVideo, preferVideos=$preferVideos")
-        
-        // Try ytm-kt first (faster, better quality data)
-        val ytmTrack = runCatching {
-            api.LoadSong.loadSong(trackId).getOrThrow()
-        }.map { it.toTrack(thumbnailQuality) }.getOrNull()
-        
-        if (ytmTrack != null) {
-            // Check if we need legacy data for missing extras (lyricsId, relatedId, isLiked)
-            val needsLegacyExtras = ytmTrack.extras["lyricsId"] == null || 
-                                     ytmTrack.extras["relatedId"] == null ||
-                                     ytmTrack.extras["isLiked"] == null
-            
-            if (needsLegacyExtras) {
-                println("ytm-kt track missing extras, fetching from legacy endpoint")
-                val legacyTrack = runCatching {
-                    echoSongEndpoint.loadSong(trackId).getOrThrow()
-                }.getOrNull()
-                
-                val mergedExtras = buildMergedExtras(ytmTrack, legacyTrack, trackId, fallbackTrack)
-                return mergeWithYtmPriority(ytmTrack, legacyTrack, fallbackTrack, mergedExtras, enableVideo, preferVideos)
-            } else {
-                println("ytm-kt track has all required extras, skipping legacy fetch")
-                val mergedExtras = buildMergedExtras(ytmTrack, null, trackId, fallbackTrack)
-                return mergeWithYtmPriority(ytmTrack, null, fallbackTrack, mergedExtras, enableVideo, preferVideos)
-            }
+        println("EchoEnhancedSongEndpoint: Loading track $trackId, title='${fallbackTrack.title}'")
+
+        // Fast-path: When clicking a track that already has metadata (e.g. from Quick picks, feed, search, playlist),
+        // return immediately with streamables so playback begins with ZERO delay (0ms).
+        if (fallbackTrack.title.isNotBlank() && fallbackTrack.artists.isNotEmpty()) {
+            println("EchoEnhancedSongEndpoint: Fast-path returning track without blocking network calls")
+            val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
+            return fallbackTrack.copy(
+                extras = mergedExtras,
+                streamables = createDefaultStreamables(trackId, enableVideo, preferVideos)
+            )
         }
-        
-        // Fallback to legacy if ytm-kt failed
-        println("ytm-kt failed, trying legacy endpoint")
-        val legacyTrack = runCatching {
+
+        // Only fetch from network if metadata is missing (e.g. clicked an ID link)
+        println("EchoEnhancedSongEndpoint: Metadata missing, fetching from endpoint")
+        val loadedTrack = runCatching {
             echoSongEndpoint.loadSong(trackId).getOrThrow()
         }.getOrNull()
-        
-        val mergedExtras = buildMergedExtras(null, legacyTrack, trackId, fallbackTrack)
-        
+
+        val mergedExtras = buildMergedExtras(null, loadedTrack, trackId, fallbackTrack)
         return when {
-            legacyTrack != null -> mergeWithLegacyPriority(legacyTrack, fallbackTrack, mergedExtras, enableVideo, preferVideos)
+            loadedTrack != null -> mergeWithLegacyPriority(loadedTrack, fallbackTrack, mergedExtras, enableVideo, preferVideos)
             else -> createFallbackTrack(fallbackTrack, mergedExtras, trackId, enableVideo, preferVideos)
         }
     }
