@@ -29,11 +29,23 @@ data class YoutubeiBrowseResponse(
             ?: contents?.singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.continuations?.firstOrNull()?.nextContinuationData?.continuation
 
     fun getShelves(hasContinuation: Boolean): List<YoutubeiShelf> {
-        return if (hasContinuation) continuationContents?.sectionListContinuation?.contents
-            ?: emptyList()
-        else contents?.singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents
-            ?: contents?.twoColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents
-            ?: contents?.sectionListRenderer?.contents ?: emptyList()
+        if (hasContinuation) {
+            return continuationContents?.sectionListContinuation?.contents ?: emptyList()
+        }
+        val result = mutableListOf<YoutubeiShelf>()
+        contents?.singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents?.let {
+            result.addAll(it)
+        }
+        contents?.twoColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents?.let {
+            result.addAll(it)
+        }
+        contents?.twoColumnBrowseResultsRenderer?.secondaryContents?.sectionListRenderer?.contents?.let {
+            result.addAll(it)
+        }
+        if (result.isEmpty()) {
+            contents?.sectionListRenderer?.contents?.let { result.addAll(it) }
+        }
+        return result
     }
 
     fun getHeaderChips(dataLanguage: String): List<SongFeedFilterChip>? =

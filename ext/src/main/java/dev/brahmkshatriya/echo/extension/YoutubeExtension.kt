@@ -302,11 +302,45 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
+        // 1. Check if the album's carousel shelves (e.g. "Releases for you", "More by...") are already cached
+        val cachedLayouts = playlistEndPoint.albumShelvesMap[album.id]
+            ?: playlistEndPoint.albumShelvesMap[cleanPlaylistId(album.id)]
+        if (!cachedLayouts.isNullOrEmpty()) {
+            val shelves = cachedLayouts.map { it.toShelf(api, api.data_language, thumbnailQuality) }
+            return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+        }
+
+        // 2. If not yet loaded, load the album to fetch tracks and shelves
+        loadAlbum(album)
+        val afterLoadLayouts = playlistEndPoint.albumShelvesMap[album.id]
+            ?: playlistEndPoint.albumShelvesMap[cleanPlaylistId(album.id)]
+        if (!afterLoadLayouts.isNullOrEmpty()) {
+            val shelves = afterLoadLayouts.map { it.toShelf(api, api.data_language, thumbnailQuality) }
+            return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+        }
+
+        // 3. Fallback: browse the album directly via songFeedEndPoint to get its shelves
+        val browseId = if (album.id.startsWith("MPREb_") || album.id.startsWith("VL")) album.id else "VL${album.id}"
+        val feedResult = songFeedEndPoint.getSongFeed(browseId = browseId).getOrNull()
+        if (feedResult != null && feedResult.layouts.isNotEmpty()) {
+            val shelves = feedResult.layouts.map { it.toShelf(api, api.data_language, thumbnailQuality) }
+                .filter { shelf ->
+                    // Exclude any shelf that is just the tracklist, keeping carousels like "Releases for you"
+                    shelf !is Shelf.Lists.Tracks || shelf.title.contains("release", ignoreCase = true) || shelf.title.contains("more", ignoreCase = true)
+                }
+            if (shelves.isNotEmpty()) {
+                return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+            }
+        }
+
+        // 4. Fallback to track radio
         val tracks = loadTracks(album)?.loadAll() ?: emptyList()
         val lastTrack = tracks.lastOrNull() ?: return null
         val loadedTrack = loadTrack(lastTrack, false)
         val shelves = loadRelated(loadedTrack)
-        return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+        return if (shelves.isNotEmpty()) {
+            Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+        } else null
     }
 
 

@@ -12,6 +12,7 @@ import dev.toastbits.ytmkt.impl.youtubei.YoutubeiPostBody
 import dev.toastbits.ytmkt.model.ApiEndpoint
 import dev.toastbits.ytmkt.model.YtmApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
+import dev.toastbits.ytmkt.model.external.mediaitem.MediaItemLayout
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylist
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylistBuilder
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmSong
@@ -26,6 +27,7 @@ import kotlinx.serialization.json.put
 
 class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
+    val albumShelvesMap = mutableMapOf<String, List<MediaItemLayout>>()
     private val continuationEndpoint = EchoPlaylistContinuationEndpoint(api)
 
     private fun formatBrowseId(browseId: String) =
@@ -67,8 +69,15 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 }
             }
         }
-        val (playlist, relation) =
+        val (playlist, relation, carouselLayouts) =
             parsePlaylistResponse(cleanId(id), res, api.data_language, api)
+
+        if (carouselLayouts.isNotEmpty()) {
+            albumShelvesMap[playlistId] = carouselLayouts
+            albumShelvesMap[cleanId(playlistId)] = carouselLayouts
+            albumShelvesMap[id] = carouselLayouts
+            albumShelvesMap[cleanId(id)] = carouselLayouts
+        }
 
         val isAlbumType = isAlbum ||
             fallbackAlbum != null ||
@@ -240,7 +249,24 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
             relatedId = relatedId ?: items.lastOrNull()?.first?.id?.let { "id://$it" }
 
-            builder.build() to relatedId
+            val carouselShelves = mutableListOf<YoutubeiBrowseResponse.YoutubeiShelf>()
+            parsed.contents?.singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents?.filter {
+                it.musicCarouselShelfRenderer != null
+            }?.let { carouselShelves.addAll(it) }
+
+            parsed.contents?.twoColumnBrowseResultsRenderer?.secondaryContents?.sectionListRenderer?.contents?.filter {
+                it.musicCarouselShelfRenderer != null
+            }?.let { carouselShelves.addAll(it) }
+
+            parsed.contents?.twoColumnBrowseResultsRenderer?.tabs?.firstOrNull()?.tabRenderer?.content?.sectionListRenderer?.contents?.filter {
+                it.musicCarouselShelfRenderer != null
+            }?.let { carouselShelves.addAll(it) }
+
+            val carouselLayouts = if (api is YoutubeiApi && carouselShelves.isNotEmpty()) {
+                EchoSongFeedEndpoint.processRows(carouselShelves.distinctBy { it.title?.text ?: it.hashCode() }, api)
+            } else emptyList()
+
+            Triple(builder.build(), relatedId, carouselLayouts)
         }
     }
 }
