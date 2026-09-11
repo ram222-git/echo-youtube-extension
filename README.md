@@ -76,4 +76,4 @@ The output will be generated in `app/build/outputs/apk/release/app-release.apk`.
 ## 🙏 Credits & Acknowledgments
 
 - **[Echo](https://github.com/brahmkshatriya/echo)** by [Brahmkshatriya](https://github.com/brahmkshatriya)
-- **[YTM-kt](https://github.com/toasterofbread/ytm-kt/)** by [Talo (toasterofbread)](https://github.com/toasterofbread) for the underlying YouTube Music API client.
+- **[YTM-kt](https://gitlab.com/toasterofbread/ytm-kt)** by [Talo (toasterofbread)](https://gitlab.com/toasterofbread) for the underlying YouTube Music API client.
