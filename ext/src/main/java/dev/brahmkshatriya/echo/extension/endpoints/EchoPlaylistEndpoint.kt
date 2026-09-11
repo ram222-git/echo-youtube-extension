@@ -93,10 +93,12 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 .ifEmpty {
                     fallbackAlbum?.artists?.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" } ?: emptyList()
                 }
+            val finalTitle = if (parsed.title.isNotBlank() && parsed.title != "Unknown") parsed.title
+                else fallbackAlbum?.title?.takeIf { it.isNotBlank() && it != "Unknown" } ?: parsed.title
             parsed.copy(
                 artists = validArtists.ifEmpty { parsed.artists },
                 cover = parsed.cover ?: fallbackAlbum?.cover,
-                title = if (parsed.title.isBlank() || parsed.title == "Unknown") fallbackAlbum?.title ?: parsed.title else parsed.title
+                title = finalTitle
             )
         } else null
 
@@ -134,7 +136,10 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 )
             }
         }
-        Triple(playlist, relation, songs)
+        val finalPlaylist = if (resolvedAlbum != null && resolvedAlbum.title.isNotBlank() && resolvedAlbum.title != "Unknown") {
+            playlist.copy(name = resolvedAlbum.title)
+        } else playlist
+        Triple(finalPlaylist, relation, songs)
     }
 
 
@@ -196,9 +201,17 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val playlistData = parsed.contents?.twoColumnBrowseResultsRenderer?.tabs?.firstOrNull()
                 ?.tabRenderer?.content?.sectionListRenderer?.contents?.firstOrNull()
                 ?.getPlaylistData(hl)
+                ?: parsed.contents?.singleColumnBrowseResultsRenderer?.tabs?.firstOrNull()
+                    ?.tabRenderer?.content?.sectionListRenderer?.contents?.firstOrNull()
+                    ?.getPlaylistData(hl)
 
+            val microformatTitle = parsed.microformat?.microformatDataRenderer?.title?.trim()
             if (playlistData != null) {
-                builder.name = playlistData.title
+                builder.name = if (!playlistData.title.isNullOrBlank() && playlistData.title != "Unknown") {
+                    playlistData.title
+                } else {
+                    microformatTitle?.takeIf { it.isNotBlank() && it != "Unknown" } ?: playlistData.title
+                }
                 builder.description = playlistData.description
                 builder.thumbnail_provider = playlistData.thumbnail
                 builder.artists = playlistData.artists
@@ -206,6 +219,8 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 builder.owner_id = "${playlistData.explicit},${playlistData.isEditable}"
                 builder.item_count = playlistData.count
                 builder.total_duration = playlistData.duration
+            } else if (!microformatTitle.isNullOrBlank()) {
+                builder.name = microformatTitle
             }
 
             builder.type = if (cleanId(playlistId).startsWith("MPREb_") || playlistId.startsWith("MPREb_")) YtmPlaylist.Type.ALBUM else YtmPlaylist.Type.PLAYLIST

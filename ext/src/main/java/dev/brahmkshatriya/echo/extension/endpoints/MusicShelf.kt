@@ -90,11 +90,49 @@ data class MusicTwoRowItemRenderer(
         val watchEndpoint = navigationEndpoint.watchEndpoint
         val playlistEndpoint = navigationEndpoint.watchPlaylistEndpoint
         return if (watchEndpoint?.videoId != null) {
-            val album: YtmPlaylist? = menu?.menuRenderer?.items?.find {
-                it.menuNavigationItemRenderer?.navigationEndpoint?.browseEndpoint?.getMediaItemType() == YtmMediaItem.Type.PLAYLIST
-            }?.menuNavigationItemRenderer?.navigationEndpoint?.browseEndpoint?.browseId?.let {
-                YtmPlaylist(YtmPlaylist.cleanId(it))
+            var albumId: String? = null
+            var albumName: String? = null
+
+            subtitle?.runs?.forEach { run ->
+                val endpoint = run.navigationEndpoint?.browseEndpoint
+                val bId = endpoint?.browseId
+                val pageType = endpoint?.getPageType()
+                val isAlbum = bId?.startsWith("MPREb_") == true ||
+                              bId?.startsWith("OLAK5uy_") == true ||
+                              pageType == "MUSIC_PAGE_TYPE_ALBUM" ||
+                              pageType?.contains("ALBUM", ignoreCase = true) == true
+
+                if (isAlbum && bId != null) {
+                    albumId = YtmPlaylist.cleanId(bId)
+                    val candidateName = run.text.trim().takeIf { it.isNotEmpty() && it != "•" && it != "·" }
+                    if (candidateName != null) {
+                        albumName = candidateName
+                    }
+                }
             }
+
+            if (albumId == null) {
+                val menuItem = menu?.menuRenderer?.items?.find {
+                    val endpoint = it.menuNavigationItemRenderer?.navigationEndpoint?.browseEndpoint
+                    val bId = endpoint?.browseId
+                    val type = endpoint?.getMediaItemType()
+                    val pageType = endpoint?.getPageType()
+                    type == YtmMediaItem.Type.PLAYLIST ||
+                    pageType?.contains("ALBUM", ignoreCase = true) == true ||
+                    bId?.startsWith("MPREb_") == true ||
+                    bId?.startsWith("OLAK5uy_") == true
+                }
+                albumId = menuItem?.menuNavigationItemRenderer?.navigationEndpoint?.browseEndpoint?.browseId?.let {
+                    YtmPlaylist.cleanId(it)
+                }
+            }
+
+            val album: YtmPlaylist? = if (albumId != null) {
+                YtmPlaylist(
+                    id = albumId!!,
+                    name = albumName
+                )
+            } else null
             val thumbnail =
                 thumbnailRenderer.musicThumbnailRenderer?.thumbnail?.thumbnails?.firstOrNull()
             val songId: String = YtmSong.cleanId(watchEndpoint.videoId!!)

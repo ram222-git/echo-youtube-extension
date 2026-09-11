@@ -32,9 +32,9 @@ class EchoEnhancedSongEndpoint(
     ): Track {
         println("EchoEnhancedSongEndpoint: Loading track $trackId, title='${fallbackTrack.title}'")
 
-        // Fast-path: When clicking a track that already has metadata (e.g. from Quick picks, feed, search, playlist),
+        // Fast-path: When clicking a track that already has full metadata including album,
         // return immediately with streamables so playback begins with ZERO delay (0ms).
-        if (fallbackTrack.title.isNotBlank() && fallbackTrack.artists.isNotEmpty()) {
+        if (fallbackTrack.title.isNotBlank() && fallbackTrack.artists.isNotEmpty() && fallbackTrack.album != null && fallbackTrack.album?.title != "Unknown") {
             println("EchoEnhancedSongEndpoint: Fast-path returning track without blocking network calls")
             val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
             return fallbackTrack.copy(
@@ -152,8 +152,12 @@ class EchoEnhancedSongEndpoint(
         val legacyValid = sanitizeArtists(legacyTrack.artists, legacyTrack.title)
         val fallbackValid = sanitizeArtists(fallbackTrack.artists, legacyTrack.title)
         val finalArtists = if (legacyValid.isNotEmpty()) legacyValid else fallbackValid.ifEmpty { legacyTrack.artists }
+        val resolvedAlbum = legacyTrack.album ?: fallbackTrack.album
 
         return legacyTrack.copy(
+            title = if (legacyTrack.title.isNotBlank() && legacyTrack.title != "Unknown") legacyTrack.title else fallbackTrack.title,
+            cover = legacyTrack.cover ?: fallbackTrack.cover,
+            album = resolvedAlbum,
             artists = finalArtists,
             extras = mergedExtras,
             streamables = createDefaultStreamables(mergedExtras["videoId"] ?: legacyTrack.id, enableVideo)

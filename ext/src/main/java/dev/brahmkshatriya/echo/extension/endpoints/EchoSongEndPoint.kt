@@ -138,6 +138,8 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
         }
 
         val artistsList = mutableListOf<YtmArtist>()
+        var detectedAlbumId: String? = null
+        var detectedAlbumTitle: String? = null
 
         // 1. LongRuns is the authoritative source where YouTube provides separate runs for each artist
         if (longRuns != null) {
@@ -156,7 +158,11 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId)) {
+                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM") == true) {
+                    if (detectedAlbumId == null && browseId != null) {
+                        detectedAlbumId = browseId
+                        detectedAlbumTitle = text
+                    }
                     if (artistsList.isNotEmpty()) break
                     continue
                 }
@@ -183,7 +189,13 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId)) continue
+                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM") == true) {
+                    if (detectedAlbumId == null && browseId != null) {
+                        detectedAlbumId = browseId
+                        detectedAlbumTitle = text
+                    }
+                    continue
+                }
                 if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
 
                 artistsList.add(YtmArtist(browseId ?: "", text))
@@ -263,12 +275,21 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
         val coverUrl = thumbnails?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
         val cover = coverUrl?.toImageHolder()
 
+        val album = if (!detectedAlbumId.isNullOrBlank()) {
+            dev.brahmkshatriya.echo.common.models.Album(
+                id = detectedAlbumId,
+                title = detectedAlbumTitle?.takeIf { it.isNotBlank() && it != "Unknown" } ?: "Unknown",
+                cover = cover,
+                artists = artists.map { it.toArtist(ThumbnailProvider.Quality.HIGH) }
+            )
+        } else null
+
         Track(
             id = songId,
             title = title,
             cover = cover,
             artists = artists.map { it.toArtist(ThumbnailProvider.Quality.HIGH) },
-            album = null,
+            album = album,
             duration = duration,
             extras = mutableMapOf<String, String>().apply {
                 relatedBrowseId?.let { put("relatedId", it) }

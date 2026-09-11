@@ -22,7 +22,8 @@ import kotlinx.serialization.Serializable
 data class YoutubeiBrowseResponse(
     val contents: Contents?,
     val continuationContents: ContinuationContents?,
-    val header: Header?
+    val header: Header?,
+    val microformat: Microformat? = null
 ) {
     val ctoken: String?
         get() = continuationContents?.sectionListContinuation?.continuations?.firstOrNull()?.nextContinuationData?.continuation
@@ -166,7 +167,9 @@ data class YoutubeiBrowseResponse(
 
         fun getPlaylistData(hl: String) = (musicResponsiveHeaderRenderer
             ?: musicEditablePlaylistDetailHeaderRenderer?.header?.musicResponsiveHeaderRenderer)?.run {
-            val title = title?.runs?.firstOrNull()?.text ?: "Unknown"
+            val title = this.title?.runs?.joinToString("") { it.text }?.trim()?.takeIf { it.isNotBlank() && it != "Unknown" }
+                ?: this.title?.runs?.firstOrNull()?.text?.trim()?.takeIf { it.isNotBlank() && it != "Unknown" }
+                ?: "Unknown"
             val thumbnail = thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails?.let {
                 ThumbnailProvider.fromThumbnails(it)
             }
@@ -614,6 +617,16 @@ data class YoutubeiBrowseResponse(
     data class TextLine(
         val content: String? = null,
         val styleRuns: List<StyleRun>? = null
+    )
+
+    @Serializable
+    data class Microformat(
+        val microformatDataRenderer: MicroformatDataRenderer? = null
+    )
+
+    @Serializable
+    data class MicroformatDataRenderer(
+        val title: String? = null
     )
 
 }

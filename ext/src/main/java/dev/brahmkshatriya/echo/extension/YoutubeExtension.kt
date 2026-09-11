@@ -347,7 +347,13 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         val parsedAlbum = ytmPlaylist.toAlbum(false, HIGH)
         val resolvedArtists = parsedAlbum.artists.filter { it.name.isNotBlank() && it.name != "Unknown" && it.name != "•" }
             .ifEmpty { album.artists }
-        return parsedAlbum.copy(artists = resolvedArtists)
+        val finalTitle = if (parsedAlbum.title.isNotBlank() && parsedAlbum.title != "Unknown") parsedAlbum.title
+            else album.title.takeIf { it.isNotBlank() && it != "Unknown" } ?: parsedAlbum.title
+        return parsedAlbum.copy(
+            title = finalTitle,
+            artists = resolvedArtists,
+            cover = parsedAlbum.cover ?: album.cover
+        )
     }
 
     override suspend fun loadTracks(album: Album): Feed<Track>? {
