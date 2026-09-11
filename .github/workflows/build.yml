@@ -34,16 +34,19 @@ jobs:
           version=$( echo ${{ github.sha }} | cut -c1-7 )
           echo "VERSION=v$version" >> $GITHUB_ENV
           echo "APP_PATH=app/build/${{ env.TAG }}-$version.eapk" >> $GITHUB_ENV
-          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > $GITHUB_WORKSPACE/signing-key.jks
+          echo "${{ secrets.KEYSTORE_B64 }}" | tr -d '\r' | base64 -d > $GITHUB_WORKSPACE/signing-key.jks
           chmod +x ./gradlew
 
       - name: Build with Gradle
         env:
           KEYSTORE_FILE: ${{ github.workspace }}/signing-key.jks
           KEYSTORE_PASS: ${{ secrets.PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'key0' }}
+          RAW_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          ./gradlew assembleRelease -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" -Pandroid.injected.signing.key.alias="$KEY_ALIAS" -Pandroid.injected.signing.key.password="$KEYSTORE_PASS"
+          ALIAS=$(echo -n "$RAW_ALIAS" | tr -d '\r\n ')
+          [ -z "$ALIAS" ] && ALIAS="key0"
+          PASS=$(echo -n "$KEYSTORE_PASS" | tr -d '\r\n')
+          ./gradlew assembleRelease -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" -Pandroid.injected.signing.store.password="$PASS" -Pandroid.injected.signing.key.alias="$ALIAS" -Pandroid.injected.signing.key.password="$PASS"
           mkdir -p app/build
           cp app/build/outputs/apk/release/app-release.apk ${{ env.APP_PATH }}
           cp app/build/outputs/apk/release/app-release.apk app/build/${{ env.TAG }}-${{ env.VERSION }}.apk
