@@ -57,6 +57,12 @@ tasks.named("preBuild") {
     dependsOn("generateProguardRules")
 }
 
+tasks.register("uninstall") {
+    dependsOn("uninstallDebug")
+    group = "Install"
+    description = "Uninstalls the debug build from connected devices."
+}
+
 android {
     namespace = "dev.brahmkshatriya.echo.extension"
     compileSdk = 36
@@ -83,13 +89,16 @@ android {
     }
 
     buildTypes {
-        all {
+        getByName("release") {
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 generatedProguard.absolutePath,
                 "proguard-rules.pro"
             )
+        }
+        getByName("debug") {
+            isMinifyEnabled = false
         }
     }
 }

@@ -210,57 +210,62 @@ class RadioGenerator(
                     browseId?.startsWith("FE") == true
         }
 
-        var artists = shortRuns?.mapNotNull { runElement ->
-            val runObj = runElement.jsonObject
-            val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-            if (text.isEmpty() || text == "•" || text == "·" || text == "," || text == "&" || text.matches(Regex("""[•·,&/\s]+"""))) return@mapNotNull null
-            if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true)) return@mapNotNull null
-            val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
-            val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
-            val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
-                ?.get("browseEndpointContextMusicConfig")?.jsonObject
-                ?.get("pageType")?.jsonPrimitive?.contentOrNull
+        val artists = mutableListOf<Artist>()
 
-            if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
-
-            val resolvedBrowseId = browseId ?: longRuns?.firstNotNullOfOrNull { longEl ->
-                val longObj = longEl.jsonObject
-                if (longObj["text"]?.jsonPrimitive?.contentOrNull?.trim() == text) {
-                    val longEp = longObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
-                    val bId = longEp?.get("browseId")?.jsonPrimitive?.contentOrNull
-                    val pType = longEp?.get("browseEndpointContextSupportedConfigs")?.jsonObject
-                        ?.get("browseEndpointContextMusicConfig")?.jsonObject
-                        ?.get("pageType")?.jsonPrimitive?.contentOrNull
-                    if (isArtistType(pType, bId)) bId else null
-                } else null
-            } ?: ""
-            Artist(id = resolvedBrowseId, name = text)
-        }?.filter { it.name.isNotBlank() && it.name != "Unknown" }.orEmpty()
-
-        if (artists.isEmpty()) {
-            artists = longRuns?.mapNotNull { runElement ->
+        // 1. LongRuns is the authoritative source where YouTube provides separate runs for each artist
+        if (longRuns != null) {
+            for (runElement in longRuns) {
                 val runObj = runElement.jsonObject
-                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-                if (text.isEmpty() || text == "•" || text == "·" || text.matches(Regex("""[•·\s]+"""))) return@mapNotNull null
-                if (text.matches(Regex("""\d{4}""")) || text.matches(Regex("""\d{1,2}:\d{2}"""))) return@mapNotNull null
-                if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true) || text.endsWith("plays", ignoreCase = true)) return@mapNotNull null
+                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
+                if (text.isEmpty()) continue
+
+                // Bullet or metadata run means artist section is finished
+                if (text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) {
+                    if (artists.isNotEmpty()) break
+                }
+
                 val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
                 val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
                 val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
-                if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) return@mapNotNull null
+                if (isAlbumOrPlaylist(pageType, browseId)) {
+                    if (artists.isNotEmpty()) break
+                    continue
+                }
 
-                if (isArtistType(pageType, browseId)) {
-                    Artist(id = browseId ?: "", name = text)
-                } else null
-            }?.filter { it.name.isNotBlank() && it.name != "Unknown" }.orEmpty()
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+                if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) continue
+
+                if (isArtistType(pageType, browseId) || browseId?.startsWith("UC") == true || (browseId == null && !text.contains("•"))) {
+                    artists.add(Artist(id = browseId ?: "", name = text))
+                }
+            }
         }
 
-        // Sanitize artists
-        artists = artists.filter {
+        // 2. Fallback to shortRuns if longRuns yielded nothing
+        if (artists.isEmpty() && shortRuns != null) {
+            for (runElement in shortRuns) {
+                val runObj = runElement.jsonObject
+                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
+                if (text.isEmpty() || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+
+                val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+                val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+                val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                    ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                    ?.get("pageType")?.jsonPrimitive?.contentOrNull
+
+                if (isAlbumOrPlaylist(pageType, browseId)) continue
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
+
+                artists.add(Artist(id = browseId ?: "", name = text))
+            }
+        }
+
+        // 3. Sanitize and split combined artists if present
+        var sanitizedArtists = artists.filter {
             it.name.isNotBlank() &&
             it.name != "Unknown" &&
             it.name != "•" &&
@@ -273,6 +278,8 @@ class RadioGenerator(
                 list.filterNot { it.name.equals(title, ignoreCase = true) && !it.id.startsWith("UC") }
             } else list
         }.distinctBy { it.id.ifEmpty { it.name } }
+
+        sanitizedArtists = dev.brahmkshatriya.echo.extension.utils.ArtistUtils.splitCombinedArtists(sanitizedArtists)
 
         val thumbnails = renderer["thumbnail"]?.jsonObject
             ?.get("thumbnails")?.jsonArray
@@ -288,7 +295,7 @@ class RadioGenerator(
         return Track(
             id = videoId,
             title = title,
-            artists = artists.ifEmpty { listOf(Artist(id = "", name = "Unknown")) },
+            artists = sanitizedArtists.ifEmpty { listOf(Artist(id = "", name = "Unknown")) },
             cover = coverUrl?.toImageHolder(crop = true),
             duration = durationMs,
             streamables = EchoEnhancedSongEndpoint.createDefaultStreamables(videoId),

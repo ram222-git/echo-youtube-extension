@@ -136,57 +136,61 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                     browseId?.startsWith("FE") == true
         }
 
-        var artists = shortRuns?.mapNotNull { runElement ->
-            val runObj = runElement.jsonObject
-            val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-            if (text.isEmpty() || text == "•" || text == "·" || text == "," || text == "&" || text.matches(Regex("""[•·,&/\s]+"""))) return@mapNotNull null
-            if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true)) return@mapNotNull null
-            val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
-            val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
-            val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
-                ?.get("browseEndpointContextMusicConfig")?.jsonObject
-                ?.get("pageType")?.jsonPrimitive?.contentOrNull
+        val artistsList = mutableListOf<YtmArtist>()
 
-            if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
-
-            val resolvedBrowseId = browseId ?: longRuns?.firstNotNullOfOrNull { longEl ->
-                val longObj = longEl.jsonObject
-                if (longObj["text"]?.jsonPrimitive?.contentOrNull?.trim() == text) {
-                    val longEp = longObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
-                    val bId = longEp?.get("browseId")?.jsonPrimitive?.contentOrNull
-                    val pType = longEp?.get("browseEndpointContextSupportedConfigs")?.jsonObject
-                        ?.get("browseEndpointContextMusicConfig")?.jsonObject
-                        ?.get("pageType")?.jsonPrimitive?.contentOrNull
-                    if (isArtistType(pType, bId)) bId else null
-                } else null
-            } ?: ""
-            YtmArtist(resolvedBrowseId, text)
-        }?.filter { it.name?.isNotBlank() == true && it.name != "Unknown" }.orEmpty()
-
-        if (artists.isEmpty()) {
-            artists = longRuns?.mapNotNull { runElement ->
+        // 1. LongRuns is the authoritative source where YouTube provides separate runs for each artist
+        if (longRuns != null) {
+            for (runElement in longRuns) {
                 val runObj = runElement.jsonObject
-                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: return@mapNotNull null
-                if (text.isEmpty() || text == "•" || text == "·" || text.matches(Regex("""[•·\s]+"""))) return@mapNotNull null
-                if (text.matches(Regex("""\d{4}""")) || text.matches(Regex("""\d{1,2}:\d{2}"""))) return@mapNotNull null
-                if (text.endsWith("views", ignoreCase = true) || text.endsWith("likes", ignoreCase = true) || text.endsWith("plays", ignoreCase = true)) return@mapNotNull null
+                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
+                if (text.isEmpty()) continue
+
+                if (text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) {
+                    if (artistsList.isNotEmpty()) break
+                }
+
                 val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
                 val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
                 val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId)) return@mapNotNull null
-                if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) return@mapNotNull null
+                if (isAlbumOrPlaylist(pageType, browseId)) {
+                    if (artistsList.isNotEmpty()) break
+                    continue
+                }
 
-                if (isArtistType(pageType, browseId)) {
-                    YtmArtist(browseId ?: "", text)
-                } else null
-            }?.filter { it.name?.isNotBlank() == true && it.name != "Unknown" }.orEmpty()
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+                if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) continue
+
+                if (isArtistType(pageType, browseId) || browseId?.startsWith("UC") == true || (browseId == null && !text.contains("•"))) {
+                    artistsList.add(YtmArtist(browseId ?: "", text))
+                }
+            }
         }
 
-        // Sanitize artists
-        artists = artists.filter {
+        // 2. Fallback to shortRuns if longRuns yielded nothing
+        if (artistsList.isEmpty() && shortRuns != null) {
+            for (runElement in shortRuns) {
+                val runObj = runElement.jsonObject
+                val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
+                if (text.isEmpty() || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+
+                val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
+                val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+                val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                    ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                    ?.get("pageType")?.jsonPrimitive?.contentOrNull
+
+                if (isAlbumOrPlaylist(pageType, browseId)) continue
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
+
+                artistsList.add(YtmArtist(browseId ?: "", text))
+            }
+        }
+
+        // 3. Sanitize artists
+        var artists = artistsList.filter {
             it.name?.isNotBlank() == true &&
             it.name != "Unknown" &&
             it.name != "•" &&
@@ -199,6 +203,24 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 list.filterNot { it.name.equals(title, ignoreCase = true) && !it.id.startsWith("UC") }
             } else list
         }.distinctBy { it.id.ifEmpty { it.name } }
+
+        // Split combined artists if any single YtmArtist has combined names
+        val splitArtists = mutableListOf<YtmArtist>()
+        for (artist in artists) {
+            val name = artist.name.orEmpty()
+            if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.shouldSplitArtist(name)) {
+                val splitNames = dev.brahmkshatriya.echo.extension.utils.ArtistUtils.splitArtistNames(name)
+                if (splitNames.size > 1) {
+                    splitNames.forEachIndexed { index, splitName ->
+                        val id = if (index == 0 && artist.id.startsWith("UC")) artist.id else ""
+                        splitArtists.add(YtmArtist(id, splitName))
+                    }
+                    continue
+                }
+            }
+            splitArtists.add(artist)
+        }
+        artists = splitArtists.distinctBy { it.id.ifEmpty { it.name } }
 
         // Fallback to /player endpoint if title or artists are missing or Unknown
         if (title == "Unknown" || artists.isEmpty() || artists.all { it.name == "Unknown" }) {
@@ -220,7 +242,15 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val author = details?.author?.takeIf { it.isNotBlank() && it != "Unknown" }
             if (author != null && (artists.isEmpty() || artists.all { it.name == "Unknown" })) {
                 val channelId = details.channelId.orEmpty()
-                artists = listOf(YtmArtist(channelId, author))
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.shouldSplitArtist(author)) {
+                    val splitNames = dev.brahmkshatriya.echo.extension.utils.ArtistUtils.splitArtistNames(author)
+                    artists = splitNames.mapIndexed { idx, name ->
+                        val id = if (idx == 0 && channelId.startsWith("UC")) channelId else ""
+                        YtmArtist(id, name)
+                    }
+                } else {
+                    artists = listOf(YtmArtist(channelId, author))
+                }
             }
         }
 

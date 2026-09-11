@@ -38,6 +38,7 @@ class EchoEnhancedSongEndpoint(
             println("EchoEnhancedSongEndpoint: Fast-path returning track without blocking network calls")
             val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
             return fallbackTrack.copy(
+                artists = sanitizeArtists(fallbackTrack.artists, fallbackTrack.title),
                 extras = mergedExtras,
                 streamables = createDefaultStreamables(trackId, enableVideo)
             )
@@ -125,7 +126,7 @@ class EchoEnhancedSongEndpoint(
     }
 
     private fun sanitizeArtists(artists: List<Artist>, trackTitle: String): List<Artist> {
-        return artists.filter {
+        val filtered = artists.filter {
             it.name.isNotBlank() &&
             it.name != "Unknown" &&
             it.name != "•" &&
@@ -138,6 +139,8 @@ class EchoEnhancedSongEndpoint(
                 list.filterNot { it.name.equals(trackTitle, ignoreCase = true) && !it.id.startsWith("UC") }
             } else list
         }.distinctBy { it.id.ifEmpty { it.name } }
+
+        return dev.brahmkshatriya.echo.extension.utils.ArtistUtils.splitCombinedArtists(filtered)
     }
 
     private fun mergeWithLegacyPriority(

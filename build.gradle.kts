@@ -4,3 +4,9 @@ plugins {
     alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.jvm) apply false
 }
+
+tasks.register("uninstall") {
+    dependsOn(":app:uninstall")
+    group = "Install"
+    description = "Uninstalls the debug build from connected devices."
+}
