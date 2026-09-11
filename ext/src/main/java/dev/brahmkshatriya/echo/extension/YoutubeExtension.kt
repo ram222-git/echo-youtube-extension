@@ -101,21 +101,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "Enable Video Qualities & Background",
             "enable_video",
             "Show video playback and video background options in Quality Selection. Turn off to show only audio qualities.",
-            true
-        ),
-        SettingSwitch(
-            "Prefer Videos",
-            "prefer_videos",
-            "Prefer videos over audio when available.",
             false
-        ),
-        SettingList(
-            "Video Quality",
-            "video_quality",
-            "Maximum video quality for playback.",
-            entryTitles = listOf("360p", "480p", "720p", "1080p", "Best Available"),
-            entryValues = listOf("360", "480", "720", "1080", "999999"),
-            defaultEntryIndex = 3
         )
     )
 
@@ -143,9 +129,6 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     
     private val thumbnailQuality
         get() = components.thumbnailQuality
-
-    private val preferVideos
-        get() = components.preferVideos
 
     companion object {
         const val ENGLISH = "en-GB"
@@ -183,15 +166,14 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     override suspend fun loadStreamableMedia(
         streamable: Streamable, isDownload: Boolean
     ): Streamable.Media {
-        return components.trackLoader.loadStreamableMedia(streamable, preferVideos)
+        return components.trackLoader.loadStreamableMedia(streamable)
     }
     
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         return components.trackLoader.loadTrackDetails(
             track,
             thumbnailQuality,
-            components.enableVideo,
-            components.preferVideos
+            components.enableVideo
         )
     }
 

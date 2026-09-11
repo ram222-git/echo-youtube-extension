@@ -19,8 +19,6 @@ class YouTubeStreamResolver(
         dev.brahmkshatriya.echo.extension.YtmKtVideoFormatsEndpoint(api)
     }
     
-    private val maxVideoQuality: Int
-        get() = settings.getString("video_quality")?.toIntOrNull() ?: 480
 
     private fun createStreamingRequest(url: String): NetworkRequest {
         return NetworkRequest(
@@ -33,17 +31,16 @@ class YouTubeStreamResolver(
         )
     }
 
-    suspend fun resolveStreamable(videoId: String, preferVideos: Boolean): Streamable.Media {
-        return resolveStreamable(null, videoId, preferVideos)
+    suspend fun resolveStreamable(videoId: String): Streamable.Media {
+        return resolveStreamable(null, videoId)
     }
 
     suspend fun resolveStreamable(
         streamable: Streamable?,
-        videoId: String,
-        preferVideos: Boolean
+        videoId: String
     ): Streamable.Media {
         println("Loading streamable media for video ID: $videoId, title: ${streamable?.title}")
-        return resolveStreamableInternal(streamable, videoId, preferVideos)
+        return resolveStreamableInternal(streamable, videoId)
     }
 
     suspend fun resolveBackground(videoId: String): Streamable.Media {
@@ -99,11 +96,10 @@ class YouTubeStreamResolver(
     
     private suspend fun resolveStreamableInternal(
         streamable: Streamable?,
-        videoId: String,
-        preferVideos: Boolean
+        videoId: String
     ): Streamable.Media {
         val streamType = streamable?.extras?.get("type")
-        val isVideoRequest = streamType == "video" || (streamType == null && preferVideos)
+        val isVideoRequest = streamType == "video"
         val targetHeight = streamable?.extras?.get("height")?.toIntOrNull()
         val targetCodec = streamable?.extras?.get("codec")
         val targetBitrate = streamable?.extras?.get("bitrate")?.toIntOrNull()
@@ -178,7 +174,7 @@ class YouTubeStreamResolver(
     ): ExtractionResult {
         return try {
             if (isVideoRequest) {
-                val reqHeight = targetHeight ?: maxVideoQuality
+                val reqHeight = targetHeight ?: 720
 
                 // Single StreamInfo.getInfo call — get muxed + video-only + audio at once
                 val allResult = getRealNewPipe().getAllStreams(videoId)
@@ -273,7 +269,7 @@ class YouTubeStreamResolver(
     ): ExtractionResult {
         return try {
             if (isVideoRequest) {
-                val reqHeight = targetHeight ?: maxVideoQuality
+                val reqHeight = targetHeight ?: 720
                 val muxedResult = ytmKtEndpoint.getMuxedVideoStreams(videoId)
                 val allMuxed = muxedResult.getOrNull() ?: emptyList()
 
@@ -378,7 +374,7 @@ class YouTubeStreamResolver(
                 val audioFormats = adaptiveFormats.filter {
                     it.mimeType.lowercase().contains("audio/") && it.url != null
                 }
-                val reqHeight = targetHeight ?: maxVideoQuality
+                val reqHeight = targetHeight ?: 720
                 val selectedVideo = videoFormats.minByOrNull {
                     Math.abs((it.height?.toInt() ?: 0) - reqHeight)
                 } ?: videoFormats.firstOrNull()

@@ -28,8 +28,7 @@ class EchoEnhancedSongEndpoint(
         trackId: String, 
         fallbackTrack: Track,
         thumbnailQuality: ThumbnailProvider.Quality,
-        enableVideo: Boolean = true,
-        preferVideos: Boolean = false
+        enableVideo: Boolean = false
     ): Track {
         println("EchoEnhancedSongEndpoint: Loading track $trackId, title='${fallbackTrack.title}'")
 
@@ -40,7 +39,7 @@ class EchoEnhancedSongEndpoint(
             val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
             return fallbackTrack.copy(
                 extras = mergedExtras,
-                streamables = createDefaultStreamables(trackId, enableVideo, preferVideos)
+                streamables = createDefaultStreamables(trackId, enableVideo)
             )
         }
 
@@ -52,8 +51,8 @@ class EchoEnhancedSongEndpoint(
 
         val mergedExtras = buildMergedExtras(null, loadedTrack, trackId, fallbackTrack)
         return when {
-            loadedTrack != null -> mergeWithLegacyPriority(loadedTrack, fallbackTrack, mergedExtras, enableVideo, preferVideos)
-            else -> createFallbackTrack(fallbackTrack, mergedExtras, trackId, enableVideo, preferVideos)
+            loadedTrack != null -> mergeWithLegacyPriority(loadedTrack, fallbackTrack, mergedExtras, enableVideo)
+            else -> createFallbackTrack(fallbackTrack, mergedExtras, trackId, enableVideo)
         }
     }
     
@@ -99,10 +98,9 @@ class EchoEnhancedSongEndpoint(
         legacyTrack: Track?,
         fallbackTrack: Track,
         mergedExtras: Map<String, String>,
-        enableVideo: Boolean = true,
-        preferVideos: Boolean = false
+        enableVideo: Boolean = false
     ): Track {
-        val streamables = createDefaultStreamables(mergedExtras["videoId"] ?: ytmTrack.id, enableVideo, preferVideos)
+        val streamables = createDefaultStreamables(mergedExtras["videoId"] ?: ytmTrack.id, enableVideo)
         
         return ytmTrack.copy(
             cover = ytmTrack.cover ?: fallbackTrack.cover ?: legacyTrack?.cover,
@@ -146,8 +144,7 @@ class EchoEnhancedSongEndpoint(
         legacyTrack: Track,
         fallbackTrack: Track,
         mergedExtras: Map<String, String>,
-        enableVideo: Boolean = true,
-        preferVideos: Boolean = false
+        enableVideo: Boolean = false
     ): Track {
         val legacyValid = sanitizeArtists(legacyTrack.artists, legacyTrack.title)
         val fallbackValid = sanitizeArtists(fallbackTrack.artists, legacyTrack.title)
@@ -156,7 +153,7 @@ class EchoEnhancedSongEndpoint(
         return legacyTrack.copy(
             artists = finalArtists,
             extras = mergedExtras,
-            streamables = createDefaultStreamables(mergedExtras["videoId"] ?: legacyTrack.id, enableVideo, preferVideos)
+            streamables = createDefaultStreamables(mergedExtras["videoId"] ?: legacyTrack.id, enableVideo)
         )
     }
 
@@ -164,12 +161,11 @@ class EchoEnhancedSongEndpoint(
         fallbackTrack: Track,
         mergedExtras: Map<String, String>,
         trackId: String,
-        enableVideo: Boolean = true,
-        preferVideos: Boolean = false
+        enableVideo: Boolean = false
     ): Track {
         return fallbackTrack.copy(
             extras = mergedExtras,
-            streamables = createDefaultStreamables(trackId, enableVideo, preferVideos)
+            streamables = createDefaultStreamables(trackId, enableVideo)
         )
     }
     
@@ -180,8 +176,7 @@ class EchoEnhancedSongEndpoint(
          */
         fun createDefaultStreamables(
             videoId: String,
-            enableVideo: Boolean = true,
-            preferVideos: Boolean = false
+            enableVideo: Boolean = false
         ): List<Streamable> {
             val audioStreamables = listOf(
                 // Audio Qualities
@@ -243,11 +238,7 @@ class EchoEnhancedSongEndpoint(
                 )
             )
 
-            return if (preferVideos) {
-                videoStreamables + audioStreamables
-            } else {
-                audioStreamables + videoStreamables
-            }
+            return audioStreamables + videoStreamables
         }
     }
 }

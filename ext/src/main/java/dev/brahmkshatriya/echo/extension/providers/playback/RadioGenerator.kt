@@ -53,7 +53,7 @@ class RadioGenerator(
             val fallbackTrack = item as? Track
             if (fallbackTrack != null) {
                 val radioId = "radio_${fallbackTrack.id}"
-                val paged = PagedData.Single { listOf(fallbackTrack) }
+                val paged = PagedData.Single { emptyList<Track>() }
                 radioFeedCache[radioId] = paged
                 Radio(
                     id = radioId,
@@ -96,7 +96,8 @@ class RadioGenerator(
         // 1. Try safe JSON parser on YouTube "next" endpoint first
         val customResult = fetchRadioTracksSafely(videoId, token)
         if (customResult != null && customResult.first.isNotEmpty()) {
-            return Page(customResult.first, customResult.second)
+            val tracks = customResult.first.filterNot { it.id.trim().equals(videoId.trim(), ignoreCase = true) }
+            return Page(tracks, customResult.second)
         }
 
         // 2. Fallback to ytmkt built-in
@@ -110,7 +111,7 @@ class RadioGenerator(
                 if (tr.streamables.isEmpty()) {
                     tr.copy(streamables = EchoEnhancedSongEndpoint.createDefaultStreamables(it.id))
                 } else tr
-            }
+            }.filterNot { it.id.trim().equals(videoId.trim(), ignoreCase = true) }
             return Page(tracks, ytmResult.continuation)
         }
 

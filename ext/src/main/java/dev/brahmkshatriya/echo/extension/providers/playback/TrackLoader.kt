@@ -15,8 +15,7 @@ class TrackLoader(
     suspend fun loadTrackDetails(
         track: Track,
         thumbnailQuality: ThumbnailProvider.Quality,
-        enableVideo: Boolean = true,
-        preferVideos: Boolean = false
+        enableVideo: Boolean = false
     ): Track {
         try {
             authManager.ensureVisitorId().getOrNull()
@@ -24,12 +23,11 @@ class TrackLoader(
             println("Failed to ensure visitor ID in loadTrack: ${e.message}")
         }
 
-        return enhancedSongEndpoint.loadEnhancedTrack(track.id, track, thumbnailQuality, enableVideo, preferVideos)
+        return enhancedSongEndpoint.loadEnhancedTrack(track.id, track, thumbnailQuality, enableVideo)
     }
 
     suspend fun loadStreamableMedia(
-        streamable: Streamable,
-        preferVideos: Boolean
+        streamable: Streamable
     ): Streamable.Media {
         val videoId = streamable.extras["videoId"]
             ?: streamable.id.substringAfterLast("_").takeIf { it.isNotBlank() }
@@ -37,7 +35,7 @@ class TrackLoader(
 
         return when (streamable.type) {
             Streamable.MediaType.Server -> {
-                streamResolver.resolveStreamable(streamable, videoId, preferVideos)
+                streamResolver.resolveStreamable(streamable, videoId)
             }
             Streamable.MediaType.Background -> {
                 streamResolver.resolveBackground(streamable, videoId)

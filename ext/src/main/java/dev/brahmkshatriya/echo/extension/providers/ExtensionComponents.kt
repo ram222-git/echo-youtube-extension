@@ -36,14 +36,8 @@ class ExtensionComponents(
             ThumbnailProvider.Quality.LOW
         }
 
-    val preferVideos: Boolean
-        get() = settings.getBoolean("prefer_videos") == true
-
     val enableVideo: Boolean
-        get() = settings.getBoolean("enable_video") ?: true
-
-    val maxVideoQuality: Int
-        get() = settings.getString("video_quality")?.toIntOrNull() ?: 480  
+        get() = settings.getBoolean("enable_video") ?: false
 
     //Endpoints (API Communication)
     
