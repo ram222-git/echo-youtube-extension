@@ -38,13 +38,12 @@ jobs:
           chmod +x ./gradlew
 
       - name: Build with Gradle
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/signing-key.jks
+          KEYSTORE_PASS: ${{ secrets.PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'key0' }}
         run: |
-          ./gradlew assembleRelease \
-          -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/signing-key.jks \
-          -Pandroid.injected.signing.store.password=${{ secrets.PASSWORD }} \
-          -Pandroid.injected.signing.key.alias=${{ secrets.KEY_ALIAS || 'key0' }} \
-          -Pandroid.injected.signing.key.password=${{ secrets.KEY_PASSWORD || secrets.PASSWORD }}
-          
+          ./gradlew assembleRelease -Pandroid.injected.signing.store.file="$KEYSTORE_FILE" -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" -Pandroid.injected.signing.key.alias="$KEY_ALIAS" -Pandroid.injected.signing.key.password="$KEYSTORE_PASS"
           mkdir -p app/build
           cp app/build/outputs/apk/release/app-release.apk ${{ env.APP_PATH }}
           cp app/build/outputs/apk/release/app-release.apk app/build/${{ env.TAG }}-${{ env.VERSION }}.apk
