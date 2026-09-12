@@ -32,7 +32,15 @@ object ArtistUtils {
         "mumford & sons"
     )
 
-    private val ARTIST_SPLIT_REGEX = Regex("""\s+(?:&|feat\.|ft\.|feat|ft|and|x|X)\s+|\s*,\s*|\s*/\s*""")
+    private val ARTIST_SPLIT_REGEX = Regex("""(?i)\s*(?:,\s*&\s*|,\s*and\s*|,\s*|\s+&\s+|\s+and\s+|\s+feat\.?\s+|\s+ft\.?\s+|\s+x\s+|\s*/\s*)\s*""")
+
+    fun cleanArtistName(name: String): String {
+        var clean = name.trim()
+        clean = clean.replace(Regex("""^(?:&|and|feat\.?|ft\.?|with|x)\s+""", RegexOption.IGNORE_CASE), "")
+        clean = clean.replace(Regex("""\s+(?:&|and|feat\.?|ft\.?|with|x)$""", RegexOption.IGNORE_CASE), "")
+        clean = clean.trim(' ', ',', '&', '/', '•', '·', '-')
+        return clean.trim()
+    }
 
     fun isDelimiter(text: String): Boolean {
         val lower = text.lowercase().trim()
@@ -55,7 +63,10 @@ object ArtistUtils {
         if (trimmed.isEmpty()) return false
         if (KNOWN_BAND_NAMES.contains(trimmed.lowercase())) return false
         return trimmed.contains(" & ") ||
+                trimmed.contains(", & ") ||
                 trimmed.contains(", ") ||
+                trimmed.contains(" and ", ignoreCase = true) ||
+                trimmed.contains(", and ", ignoreCase = true) ||
                 trimmed.contains(" feat. ", ignoreCase = true) ||
                 trimmed.contains(" ft. ", ignoreCase = true) ||
                 trimmed.contains(" feat ", ignoreCase = true) ||
@@ -65,7 +76,7 @@ object ArtistUtils {
 
     fun splitArtistNames(name: String): List<String> {
         return name.split(ARTIST_SPLIT_REGEX)
-            .map { it.trim() }
+            .map { cleanArtistName(it) }
             .filter { it.isNotBlank() && !isDelimiter(it) }
     }
 
