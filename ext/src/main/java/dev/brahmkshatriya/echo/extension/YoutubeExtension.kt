@@ -364,9 +364,48 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         return (trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)])?.toFeed()
     }
 
+    private val artistIdCache = mutableMapOf<String, String>()
+
+    private suspend fun resolveArtistId(artist: Artist): String? {
+        if (artist.id.isNotBlank() && (artist.id.startsWith("UC") || artist.id.startsWith("FEmusic_library"))) {
+            return artist.id
+        }
+        val name = artist.name.trim()
+        if (name.isBlank() || name == "Unknown") return null
+
+        artistIdCache[name.lowercase()]?.let { return it }
+
+        val searchedId = runCatching {
+            val searchRes = api.Search.search(
+                name,
+                params = SearchType.ARTIST.getDefaultParams()
+            ).getOrThrow()
+
+            val ytmArtist = searchRes.categories.flatMap { it.first.items }
+                .filterIsInstance<YtmArtist>()
+                .firstOrNull { it.id.startsWith("UC") }
+
+            ytmArtist?.id
+        }.getOrNull()
+
+        if (!searchedId.isNullOrBlank()) {
+            artistIdCache[name.lowercase()] = searchedId
+            return searchedId
+        }
+        return null
+    }
+
     private suspend fun getArtistMediaItems(artist: Artist): List<Shelf> {
+        val targetId = resolveArtistId(artist) ?: artist.id
+        if (targetId.isBlank()) {
+            return runCatching {
+                val results = components.searchService.searchCategory(artist.name, SearchType.SONG, thumbnailQuality)
+                results.shelves
+            }.getOrElse { emptyList() }
+        }
+
         val result =
-            loadedArtist.takeIf { artist.id == it?.id } ?: api.LoadArtist.loadArtist(artist.id)
+            loadedArtist.takeIf { targetId == it?.id } ?: api.LoadArtist.loadArtist(targetId)
                 .getOrThrow()
 
         return result.layouts?.map {
@@ -403,19 +442,21 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     private var loadedArtist: YtmArtist? = null
     override suspend fun loadArtist(artist: Artist): Artist {
-        if (artist.id.isBlank() || artist.id.startsWith("MPREb_") || artist.id.startsWith("OLAK5uy_") || artist.id.startsWith("VL") || artist.id.startsWith("PL")) {
+        val targetId = resolveArtistId(artist) ?: artist.id
+        if (targetId.isBlank() || targetId.startsWith("MPREb_") || targetId.startsWith("OLAK5uy_") || targetId.startsWith("VL") || targetId.startsWith("PL")) {
             return artist
         }
         return try {
-            val result = artistEndPoint.loadArtist(artist.id)
+            val result = artistEndPoint.loadArtist(targetId)
             loadedArtist = result
             val converted = result.toArtist(HIGH)
-            if ((converted.name.isBlank() || converted.name == "Unknown") && artist.name.isNotBlank() && artist.name != "Unknown") {
-                converted.copy(name = artist.name)
-            } else converted
+            val finalName = if ((converted.name.isBlank() || converted.name == "Unknown") && artist.name.isNotBlank() && artist.name != "Unknown") {
+                artist.name
+            } else converted.name
+            converted.copy(id = targetId, name = finalName)
         } catch (e: Exception) {
-            println("loadArtist failed for ${artist.id}: ${e.message}")
-            artist
+            println("loadArtist failed for $targetId: ${e.message}")
+            artist.copy(id = targetId)
         }
     }
 
