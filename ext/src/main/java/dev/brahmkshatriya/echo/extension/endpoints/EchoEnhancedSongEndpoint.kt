@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.extension.endpoints
 
+import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
@@ -48,6 +49,9 @@ class EchoEnhancedSongEndpoint(
         println("EchoEnhancedSongEndpoint: Metadata missing, fetching from endpoint")
         val loadedTrack = runCatching {
             echoSongEndpoint.loadSong(trackId).getOrThrow()
+        }.onFailure {
+            println("EchoEnhancedSongEndpoint: loadSong failed with: ${it.message}")
+            it.printStackTrace()
         }.getOrNull()
 
         val mergedExtras = buildMergedExtras(null, loadedTrack, trackId, fallbackTrack)
@@ -105,7 +109,7 @@ class EchoEnhancedSongEndpoint(
         
         return ytmTrack.copy(
             cover = ytmTrack.cover ?: fallbackTrack.cover ?: legacyTrack?.cover,
-            album = ytmTrack.album ?: legacyTrack?.album,
+            album = resolveBestAlbum(ytmTrack.album, legacyTrack?.album, fallbackTrack.album),
             artists = run {
                 val ytmValid = sanitizeArtists(ytmTrack.artists, ytmTrack.title)
                 val legacyValid = sanitizeArtists(legacyTrack?.artists.orEmpty(), ytmTrack.title)
@@ -123,6 +127,15 @@ class EchoEnhancedSongEndpoint(
             streamables = streamables,
             extras = mergedExtras
         )
+    }
+
+    private fun resolveBestAlbum(vararg albums: Album?): Album? {
+        for (album in albums) {
+            if (album != null && album.title.isNotBlank() && album.title != "Unknown") {
+                return album
+            }
+        }
+        return null
     }
 
     private fun sanitizeArtists(artists: List<Artist>, trackTitle: String): List<Artist> {
@@ -152,7 +165,7 @@ class EchoEnhancedSongEndpoint(
         val legacyValid = sanitizeArtists(legacyTrack.artists, legacyTrack.title)
         val fallbackValid = sanitizeArtists(fallbackTrack.artists, legacyTrack.title)
         val finalArtists = if (legacyValid.isNotEmpty()) legacyValid else fallbackValid.ifEmpty { legacyTrack.artists }
-        val resolvedAlbum = legacyTrack.album ?: fallbackTrack.album
+        val resolvedAlbum = resolveBestAlbum(legacyTrack.album, fallbackTrack.album)
 
         return legacyTrack.copy(
             title = if (legacyTrack.title.isNotBlank() && legacyTrack.title != "Unknown") legacyTrack.title else fallbackTrack.title,

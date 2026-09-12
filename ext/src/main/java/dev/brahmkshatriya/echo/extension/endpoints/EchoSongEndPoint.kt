@@ -148,40 +148,42 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
                 if (text.isEmpty()) continue
 
-                if (text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) {
-                    if (artistsList.isNotEmpty()) break
-                }
-
                 val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
                 val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
                 val pageType = browseEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM") == true) {
+                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM", ignoreCase = true) == true) {
                     if (detectedAlbumId == null && browseId != null) {
                         detectedAlbumId = browseId
                         detectedAlbumTitle = text
+                    } else if (detectedAlbumTitle == null) {
+                        detectedAlbumTitle = text
                     }
-                    if (artistsList.isNotEmpty()) break
                     continue
                 }
 
-                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+                if (text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+                if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
                 if (text.equals(title, ignoreCase = true) && browseId?.startsWith("UC") != true) continue
 
-                if (isArtistType(pageType, browseId) || browseId?.startsWith("UC") == true || (browseId == null && !text.contains("•"))) {
+                if (isArtistType(pageType, browseId) || browseId?.startsWith("UC") == true) {
                     artistsList.add(YtmArtist(browseId ?: "", text))
+                } else if (artistsList.isEmpty() && browseId == null) {
+                    artistsList.add(YtmArtist("", text))
+                } else if (detectedAlbumTitle == null && browseId == null && artistsList.isNotEmpty()) {
+                    detectedAlbumTitle = text
                 }
             }
         }
 
         // 2. Fallback to shortRuns if longRuns yielded nothing
-        if (artistsList.isEmpty() && shortRuns != null) {
+        if (shortRuns != null) {
             for (runElement in shortRuns) {
                 val runObj = runElement.jsonObject
                 val text = runObj["text"]?.jsonPrimitive?.contentOrNull?.trim() ?: continue
-                if (text.isEmpty() || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
+                if (text.isEmpty() || text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text)) continue
 
                 val browseEndpoint = runObj["navigationEndpoint"]?.jsonObject?.get("browseEndpoint")?.jsonObject
                 val browseId = browseEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
@@ -189,16 +191,39 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
                     ?.get("browseEndpointContextMusicConfig")?.jsonObject
                     ?.get("pageType")?.jsonPrimitive?.contentOrNull
 
-                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM") == true) {
+                if (isAlbumOrPlaylist(pageType, browseId) || browseId?.startsWith("MPREb_") == true || browseId?.startsWith("OLAK5uy_") == true || pageType?.contains("ALBUM", ignoreCase = true) == true) {
                     if (detectedAlbumId == null && browseId != null) {
                         detectedAlbumId = browseId
+                        detectedAlbumTitle = text
+                    } else if (detectedAlbumTitle == null) {
                         detectedAlbumTitle = text
                     }
                     continue
                 }
                 if (dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
 
-                artistsList.add(YtmArtist(browseId ?: "", text))
+                if (artistsList.isEmpty()) {
+                    artistsList.add(YtmArtist(browseId ?: "", text))
+                }
+            }
+        }
+
+        // 3. Fallback to menu for album browseId if title was detected or menu has album item
+        if (detectedAlbumId == null) {
+            val menuItems = video?.get("menu")?.jsonObject?.get("menuRenderer")?.jsonObject?.get("items")?.jsonArray
+            menuItems?.forEach { menuItem ->
+                val nav = menuItem.jsonObject["menuNavigationItemRenderer"]?.jsonObject
+                val iconType = nav?.get("icon")?.jsonObject?.get("iconType")?.jsonPrimitive?.contentOrNull
+                val bEndpoint = nav?.get("navigationEndpoint")?.jsonObject?.get("browseEndpoint")?.jsonObject
+                val bId = bEndpoint?.get("browseId")?.jsonPrimitive?.contentOrNull
+                val bPageType = bEndpoint?.get("browseEndpointContextSupportedConfigs")?.jsonObject
+                    ?.get("browseEndpointContextMusicConfig")?.jsonObject
+                    ?.get("pageType")?.jsonPrimitive?.contentOrNull
+                if (iconType == "ALBUM" || isAlbumOrPlaylist(bPageType, bId)) {
+                    if (bId != null) {
+                        detectedAlbumId = bId
+                    }
+                }
             }
         }
 
@@ -275,10 +300,10 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
         val coverUrl = thumbnails?.lastOrNull()?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
         val cover = coverUrl?.toImageHolder()
 
-        val album = if (!detectedAlbumId.isNullOrBlank()) {
+        val album = if (!detectedAlbumTitle.isNullOrBlank() && detectedAlbumTitle != "Unknown") {
             dev.brahmkshatriya.echo.common.models.Album(
-                id = detectedAlbumId,
-                title = detectedAlbumTitle?.takeIf { it.isNotBlank() && it != "Unknown" } ?: "Unknown",
+                id = detectedAlbumId ?: "album_${detectedAlbumTitle.hashCode()}",
+                title = detectedAlbumTitle,
                 cover = cover,
                 artists = artists.map { it.toArtist(ThumbnailProvider.Quality.HIGH) }
             )

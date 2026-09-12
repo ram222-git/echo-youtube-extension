@@ -9,6 +9,8 @@ import dev.toastbits.ytmkt.model.external.Thumbnail
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmArtist
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmMediaItem
+import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylist
+import dev.toastbits.ytmkt.model.external.mediaitem.YtmSong
 import dev.toastbits.ytmkt.model.internal.HeaderRenderer
 import dev.toastbits.ytmkt.model.internal.MusicMultiRowListItemRenderer
 import dev.toastbits.ytmkt.model.internal.MusicResponsiveListItemRenderer
@@ -143,9 +145,68 @@ data class YoutubeiBrowseResponse(
             // Pair(item, playlistSetVideoId)
             fun toMediaItemData(hl: String, api: YtmApi): Pair<YtmMediaItem, String?>? {
                 if (musicTwoRowItemRenderer != null) {
-                    return musicTwoRowItemRenderer.toYtmMediaItem(api)?.let { Pair(it, null) }
+                    val item = musicTwoRowItemRenderer.toYtmMediaItem(api) ?: return null
+                    val enhancedItem = if (item is YtmSong && (item.album == null || item.album?.name.isNullOrBlank() || item.album?.name == "Unknown")) {
+                        var foundAlbumTitle: String? = null
+                        var foundAlbumId: String? = item.album?.id
+                        val runs = musicTwoRowItemRenderer.subtitle?.runs.orEmpty()
+                        for (run in runs) {
+                            val text = run.text.trim()
+                            if (text.isBlank() || text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text) || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
+                            val bEndpoint = run.navigationEndpoint?.browseEndpoint
+                            val bId = bEndpoint?.browseId
+                            val pageType = bEndpoint?.getPageType()
+                            val isAlbum = pageType?.contains("ALBUM", ignoreCase = true) == true ||
+                                    bId?.startsWith("MPREb_") == true ||
+                                    bId?.startsWith("OLAK5uy_") == true ||
+                                    (foundAlbumId != null && bId == foundAlbumId)
+                            if (isAlbum) {
+                                foundAlbumTitle = text
+                                if (bId != null) foundAlbumId = bId
+                                break
+                            }
+                        }
+                        if (foundAlbumTitle != null) {
+                            item.copy(album = YtmPlaylist(id = foundAlbumId ?: "", name = foundAlbumTitle))
+                        } else if (item.album?.name.isNullOrBlank() || item.album?.name == "Unknown") {
+                            item.copy(album = null)
+                        } else item
+                    } else item
+                    return Pair(enhancedItem, null)
                 } else if (musicResponsiveListItemRenderer != null) {
-                    return musicResponsiveListItemRenderer.toMediaItemAndPlaylistSetVideoId(hl)
+                    val pair = musicResponsiveListItemRenderer.toMediaItemAndPlaylistSetVideoId(hl) ?: return null
+                    val item = pair.first
+                    val enhancedItem = if (item is YtmSong && (item.album == null || item.album?.name.isNullOrBlank() || item.album?.name == "Unknown")) {
+                        var foundAlbumTitle: String? = null
+                        var foundAlbumId: String? = item.album?.id
+                        val columns = musicResponsiveListItemRenderer.flexColumns.orEmpty()
+                        for (col in columns) {
+                            val runs = col.musicResponsiveListItemFlexColumnRenderer.text.runs.orEmpty()
+                            for (run in runs) {
+                                val text = run.text.trim()
+                                if (text.isBlank() || text == "•" || text == "·" || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isDelimiter(text) || dev.brahmkshatriya.echo.extension.utils.ArtistUtils.isMetadataRun(text)) continue
+                                val bEndpoint = run.navigationEndpoint?.browseEndpoint
+                                val bId = bEndpoint?.browseId
+                                val pageType = bEndpoint?.getPageType()
+                                val isAlbum = pageType?.contains("ALBUM", ignoreCase = true) == true ||
+                                        bId?.startsWith("MPREb_") == true ||
+                                        bId?.startsWith("OLAK5uy_") == true ||
+                                        (foundAlbumId != null && bId == foundAlbumId)
+                                if (isAlbum) {
+                                    foundAlbumTitle = text
+                                    if (bId != null) foundAlbumId = bId
+                                    break
+                                }
+                            }
+                            if (foundAlbumTitle != null) break
+                        }
+                        if (foundAlbumTitle != null) {
+                            item.copy(album = YtmPlaylist(id = foundAlbumId ?: "", name = foundAlbumTitle))
+                        } else if (item.album?.name.isNullOrBlank() || item.album?.name == "Unknown") {
+                            item.copy(album = null)
+                        } else item
+                    } else item
+                    return Pair(enhancedItem, pair.second)
                 } else if (musicMultiRowListItemRenderer != null) {
                     return Pair(musicMultiRowListItemRenderer.toMediaItem(hl), null)
                 } else if (musicTwoColumnItemRenderer != null) {

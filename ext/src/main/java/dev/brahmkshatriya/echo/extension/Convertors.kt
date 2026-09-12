@@ -257,7 +257,14 @@ fun YtmSong.toTrack(
     albumFallback: Album? = null
 ): Track {
     return try {
-        val resolvedAlbum = album?.toAlbum(false, quality) ?: albumFallback
+        val songAlbum = album
+        val resolvedAlbum = if (songAlbum != null && !songAlbum.name.isNullOrBlank() && songAlbum.name != "Unknown") {
+            songAlbum.toAlbum(false, quality)
+        } else if (albumFallback != null && albumFallback.title.isNotBlank() && albumFallback.title != "Unknown") {
+            albumFallback
+        } else {
+            null
+        }
         val extras = mutableMapOf<String, String>()
         setId?.let { extras["setId"] = it }
         
