@@ -185,7 +185,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     private suspend fun loadRelated(track: Track): List<Shelf> {
         val relatedId = track.extras["relatedId"] ?: run {
-            val loaded = runCatching { loadTrack(track, false) }.getOrNull()
+            val loaded = components.songEndpoint.loadSong(track.id).getOrNull()
             loaded?.extras?.get("relatedId")
         }
         return if (relatedId != null) {

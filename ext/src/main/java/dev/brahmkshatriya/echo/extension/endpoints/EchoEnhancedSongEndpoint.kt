@@ -33,13 +33,16 @@ class EchoEnhancedSongEndpoint(
     ): Track {
         println("EchoEnhancedSongEndpoint: Loading track $trackId, title='${fallbackTrack.title}'")
 
-        // Fast-path: When clicking a track that already has full metadata including album,
-        // return immediately with streamables so playback begins with ZERO delay (0ms).
-        if (fallbackTrack.title.isNotBlank() && fallbackTrack.artists.isNotEmpty() && fallbackTrack.album != null && fallbackTrack.album?.title != "Unknown") {
+        // Fast-path: When track already has basic metadata (title), return immediately
+        // with streamables so audio playback begins with ZERO delay (0ms).
+        // Secondary metadata (lyrics, related items) will be loaded lazily on-demand.
+        if (fallbackTrack.title.isNotBlank()) {
             println("EchoEnhancedSongEndpoint: Fast-path returning track without blocking network calls")
             val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
             return fallbackTrack.copy(
-                artists = sanitizeArtists(fallbackTrack.artists, fallbackTrack.title),
+                artists = if (fallbackTrack.artists.isNotEmpty()) {
+                    sanitizeArtists(fallbackTrack.artists, fallbackTrack.title)
+                } else fallbackTrack.artists,
                 extras = mergedExtras,
                 streamables = createDefaultStreamables(trackId, enableVideo)
             )
