@@ -17,47 +17,86 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
     private suspend fun request(
         context: JsonObject,
         id: String,
-        playlist: String? = null
+        playlist: String? = null,
+        authenticated: Boolean = false
     ): HttpResponse {
         return api.client.request {
             endpointPath("player")
-            addApiHeadersWithoutAuthentication()
+            if (authenticated && api.user_auth_state != null) {
+                addApiHeadersWithAuthenticated()
+            } else {
+                addApiHeadersWithoutAuthentication()
+            }
             postWithBody(context) {
                 put("videoId", id)
                 put("playlistId", playlist)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("playbackContext", buildJsonObject {
+                    put("contentPlaybackContext", buildJsonObject {
+                        put("signatureTimestamp", 20711)
+                    })
+                })
             }
         }
     }
 
-    suspend fun getVideo(resolve: Boolean, id: String, playlist: String? = null) = coroutineScope {
-        val web = async {
-            if (resolve) request(webRemix, id, playlist)
-                .body<YoutubeFormatResponse>().videoDetails.musicVideoType
-            else null
+
+    suspend fun getVideo(resolve: Boolean, id: String, playlist: String? = null): Pair<YoutubeFormatResponse, String?> = coroutineScope {
+        val isAuthenticated = api.user_auth_state != null
+
+        // 1. Fast Tier: For normal songs, use the direct IOS client (~250ms unthrottled streaming URLs)
+        val iosResponse = runCatching {
+            request(iosContext(), id, playlist, authenticated = false).body<YoutubeFormatResponse>()
+        }.getOrNull()
+
+        if (iosResponse?.playabilityStatus?.status == "OK" && iosResponse.streamingData?.adaptiveFormats?.isNotEmpty() == true) {
+            val web = async {
+                if (resolve) runCatching {
+                    request(webRemixContext(), id, playlist, authenticated = isAuthenticated)
+                        .body<YoutubeFormatResponse>().videoDetails.musicVideoType
+                }.getOrNull() else null
+            }
+            return@coroutineScope iosResponse to web.await()
         }
-        val ios = request(iosContext(), id, playlist).body<YoutubeFormatResponse>()
-        ios to web.await()
+
+        // 2. Fallback Tier: If IOS failed (e.g. age-restricted track requiring login) and user is authenticated
+        if (isAuthenticated) {
+            val webResponse = runCatching {
+                request(webRemixContext(), id, playlist, authenticated = true).body<YoutubeFormatResponse>()
+            }.getOrNull()
+
+            if (webResponse?.streamingData?.adaptiveFormats?.isNotEmpty() == true) {
+                return@coroutineScope webResponse to webResponse.videoDetails.musicVideoType
+            }
+        }
+
+        // Return whatever response was obtained
+        (iosResponse ?: throw IllegalStateException("Failed to retrieve video formats for $id")) to null
     }
+
 
     private fun iosContext() = buildJsonObject {
         put("context", buildJsonObject {
             put("client", buildJsonObject {
                 put("clientName", "IOS")
                 put("clientVersion", "19.34.2")
-                put("visitorData", api.visitor_id)
+                api.visitor_id?.let { put("visitorData", it) }
             })
         })
     }
 
-    private val webRemix = buildJsonObject {
+    private fun webRemixContext() = buildJsonObject {
         put("context", buildJsonObject {
             put("client", buildJsonObject {
                 put("clientName", "WEB_REMIX")
-                put("clientVersion", "1.20220606.03.00")
+                put("clientVersion", "1.20240901.01.00")
+                api.visitor_id?.let { put("visitorData", it) }
             })
         })
     }
 }
+
 
 @Serializable
 data class YoutubeFormatResponse(

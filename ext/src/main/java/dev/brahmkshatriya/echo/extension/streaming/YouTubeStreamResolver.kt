@@ -21,15 +21,39 @@ class YouTubeStreamResolver(
     
 
     private fun createStreamingRequest(url: String): NetworkRequest {
+        val headers = mutableMapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "*/*",
+            "Range" to "bytes=0-"
+        )
+
+        val isWebStream = url.contains("c=WEB_REMIX") || url.contains("c=WEB")
+        if (isWebStream) {
+            headers["Origin"] = "https://music.youtube.com"
+            headers["Referer"] = "https://music.youtube.com/"
+            val cookie = api.user_auth_state?.headers?.get("cookie") ?: api.user_auth_state?.headers?.get("Cookie")
+            if (cookie != null) {
+                headers["Cookie"] = cookie
+            }
+        }
+
         return NetworkRequest(
             url = url,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "*/*",
-                "Range" to "bytes=0-"
-            )
+            headers = headers
         )
     }
+
+
+    private suspend fun getFormatUrl(format: dev.brahmkshatriya.echo.extension.endpoints.AdaptiveFormat): String? {
+        if (format.url != null) return format.url
+        val cipher = format.signatureCipher ?: format.cipher ?: return null
+        return runCatching {
+            dev.brahmkshatriya.echo.extension.decipherer.YouTubeCipherManager.deobfuscateUrl(cipher)
+        }.onFailure {
+            println("YouTubeStreamResolver: failed to decipher format: ${it.message}")
+        }.getOrNull()
+    }
+
 
     suspend fun resolveStreamable(videoId: String): Streamable.Media {
         return resolveStreamable(null, videoId)
@@ -368,28 +392,27 @@ class YouTubeStreamResolver(
             val adaptiveFormats = streamingData.adaptiveFormats
 
             if (isVideoRequest) {
-                val videoFormats = adaptiveFormats.filter {
-                    it.mimeType.lowercase().contains("video/") && it.url != null
-                }
-                val audioFormats = adaptiveFormats.filter {
-                    it.mimeType.lowercase().contains("audio/") && it.url != null
-                }
+                val videoFormats = adaptiveFormats.filter { it.mimeType.lowercase().contains("video/") }
+                val audioFormats = adaptiveFormats.filter { it.mimeType.lowercase().contains("audio/") }
                 val reqHeight = targetHeight ?: 720
                 val selectedVideo = videoFormats.minByOrNull {
                     Math.abs((it.height?.toInt() ?: 0) - reqHeight)
                 } ?: videoFormats.firstOrNull()
                 val bestAudio = audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.firstOrNull()
 
-                if (selectedVideo?.url != null && bestAudio?.url != null) {
+                val videoUrl = selectedVideo?.let { getFormatUrl(it) }
+                val audioUrl = bestAudio?.let { getFormatUrl(it) }
+
+                if (videoUrl != null && audioUrl != null) {
                     val videoSource = Streamable.Source.Http(
-                        request = createStreamingRequest(selectedVideo.url!!),
+                        request = createStreamingRequest(videoUrl),
                         type = Streamable.SourceType.Progressive,
                         quality = (selectedVideo.height?.toInt() ?: reqHeight),
                         title = "Video ${selectedVideo.height ?: reqHeight}p"
                     )
                     val audioBitrate = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 128
                     val audioSource = Streamable.Source.Http(
-                        request = createStreamingRequest(bestAudio.url!!),
+                        request = createStreamingRequest(audioUrl),
                         type = Streamable.SourceType.Progressive,
                         quality = audioBitrate,
                         title = "Audio $audioBitrate kbps"
@@ -399,23 +422,28 @@ class YouTubeStreamResolver(
             }
 
             // Audio extraction (or fallback if video not available)
-            val audioFormats = adaptiveFormats.filter {
-                it.mimeType.lowercase().contains("audio/") && it.url != null
-            }
+            val audioFormats = adaptiveFormats.filter { it.mimeType.lowercase().contains("audio/") }
             if (audioFormats.isEmpty()) {
                 return ExtractionResult.Error("No audio formats")
             }
 
-            val selectedFormat = audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.first()
-            val bitrateKbps = if (selectedFormat.bitrate > 0) selectedFormat.bitrate / 1000 else 128
-            val singleSource = Streamable.Source.Http(
-                request = createStreamingRequest(selectedFormat.url!!),
-                type = Streamable.SourceType.Progressive,
-                quality = bitrateKbps,
-                title = "Audio $bitrateKbps kbps"
-            )
+            val sortedAudio = audioFormats.sortedByDescending { it.bitrate }
+            for (fmt in sortedAudio) {
+                val audioUrl = getFormatUrl(fmt)
+                if (audioUrl != null) {
+                    val bitrateKbps = if (fmt.bitrate > 0) fmt.bitrate / 1000 else 128
+                    val singleSource = Streamable.Source.Http(
+                        request = createStreamingRequest(audioUrl),
+                        type = Streamable.SourceType.Progressive,
+                        quality = bitrateKbps,
+                        title = "Audio $bitrateKbps kbps"
+                    )
+                    return ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
+                }
+            }
 
-            return ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
+            return ExtractionResult.Error("Failed to resolve playable audio URL from adaptive formats")
+
         } catch (e: Exception) {
             return ExtractionResult.Error(e.message ?: "Unknown error")
         }

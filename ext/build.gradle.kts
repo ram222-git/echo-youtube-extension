@@ -28,6 +28,7 @@ dependencies {
         excludeKotlin()
     }  
     implementation(libs.newpipe) { excludeKotlin() }
+    implementation(libs.rhino) { excludeKotlin() }
     implementation(libs.ktor.client.core) { excludeKotlin() }
     implementation(libs.ktor.client.cio) { excludeKotlin() }
     implementation(libs.ktor.client.content.negotiation) { excludeKotlin() }
@@ -104,4 +105,4 @@ tasks {
 
 fun execute(vararg command: String): String = providers.exec {
     commandLine(*command)
-}.standardOutput.asText.get().trim()
+}.standardOutput.asText.get().trim()
