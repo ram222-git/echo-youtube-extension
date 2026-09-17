@@ -215,7 +215,8 @@ class YouTubeStreamResolver(
                             request = createStreamingRequest(matchingMuxed.url!!),
                             type = Streamable.SourceType.Progressive,
                             quality = if (matchingMuxed.bitrate > 0) matchingMuxed.bitrate / 1000 else 0,
-                            title = cleanVideoTitle(matchingMuxed, reqHeight)
+                            title = null,
+                            isVideo = true
                         )
                         return ExtractionResult.Success(Streamable.Media.Server(listOf(muxedSource), merged = false))
                     }
@@ -231,13 +232,15 @@ class YouTubeStreamResolver(
                             request = createStreamingRequest(selectedVideo.url!!),
                             type = Streamable.SourceType.Progressive,
                             quality = if (selectedVideo.bitrate > 0) selectedVideo.bitrate / 1000 else 0,
-                            title = cleanVideoTitle(selectedVideo, reqHeight)
+                            title = null,
+                            isVideo = true
                         )
                         val audioSource = Streamable.Source.Http(
                             request = createStreamingRequest(bestAudio.url!!),
                             type = Streamable.SourceType.Progressive,
                             quality = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 0,
-                            title = cleanAudioTitle(bestAudio)
+                            title = null,
+                            isVideo = false
                         )
                         return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
                     }
@@ -273,7 +276,8 @@ class YouTubeStreamResolver(
                 request = createStreamingRequest(selectedFormat.url!!),
                 type = Streamable.SourceType.Progressive,
                 quality = if (selectedFormat.bitrate > 0) selectedFormat.bitrate / 1000 else 0,
-                title = cleanAudioTitle(selectedFormat)
+                title = null,
+                isVideo = false
             )
 
             return ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
@@ -307,7 +311,8 @@ class YouTubeStreamResolver(
                         request = createStreamingRequest(matchingMuxed.url!!),
                         type = Streamable.SourceType.Progressive,
                         quality = if (matchingMuxed.bitrate > 0) matchingMuxed.bitrate / 1000 else 0,
-                        title = cleanVideoTitle(matchingMuxed, reqHeight)
+                        title = null,
+                        isVideo = true
                     )
                     return ExtractionResult.Success(Streamable.Media.Server(listOf(muxedSource), merged = false))
                 }
@@ -326,13 +331,15 @@ class YouTubeStreamResolver(
                             request = createStreamingRequest(selectedVideo.url!!),
                             type = Streamable.SourceType.Progressive,
                             quality = if (selectedVideo.bitrate > 0) selectedVideo.bitrate / 1000 else 0,
-                            title = cleanVideoTitle(selectedVideo, reqHeight)
+                            title = null,
+                            isVideo = true
                         )
                         val audioSource = Streamable.Source.Http(
                             request = createStreamingRequest(bestAudio.url!!),
                             type = Streamable.SourceType.Progressive,
                             quality = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 0,
-                            title = cleanAudioTitle(bestAudio)
+                            title = null,
+                            isVideo = false
                         )
                         return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
                     }
@@ -363,7 +370,8 @@ class YouTubeStreamResolver(
                 request = createStreamingRequest(selectedFormat.url!!),
                 type = Streamable.SourceType.Progressive,
                 quality = if (selectedFormat.bitrate > 0) selectedFormat.bitrate / 1000 else 0,
-                title = cleanAudioTitle(selectedFormat)
+                title = null,
+                isVideo = false
             )
 
             return ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
@@ -408,14 +416,16 @@ class YouTubeStreamResolver(
                         request = createStreamingRequest(videoUrl),
                         type = Streamable.SourceType.Progressive,
                         quality = (selectedVideo.height?.toInt() ?: reqHeight),
-                        title = "Video ${selectedVideo.height ?: reqHeight}p"
+                        title = null,
+                        isVideo = true
                     )
                     val audioBitrate = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 128
                     val audioSource = Streamable.Source.Http(
                         request = createStreamingRequest(audioUrl),
                         type = Streamable.SourceType.Progressive,
                         quality = audioBitrate,
-                        title = "Audio $audioBitrate kbps"
+                        title = null,
+                        isVideo = false
                     )
                     return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
                 }
@@ -436,7 +446,8 @@ class YouTubeStreamResolver(
                         request = createStreamingRequest(audioUrl),
                         type = Streamable.SourceType.Progressive,
                         quality = bitrateKbps,
-                        title = "Audio $bitrateKbps kbps"
+                        title = null,
+                        isVideo = false
                     )
                     return ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
                 }
