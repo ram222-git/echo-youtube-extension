@@ -8,13 +8,16 @@ import dev.brahmkshatriya.echo.extension.toTrack
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 
+import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
+
 /**
  * Enhanced song endpoint that intelligently combines data from multiple sources.
  * Optimized to try ytm-kt first, then conditionally fetch legacy if needed.
  */
 class EchoEnhancedSongEndpoint(
     private val api: YoutubeiApi,
-    private val echoSongEndpoint: EchoSongEndPoint
+    private val echoSongEndpoint: EchoSongEndPoint,
+    private val likeManager: LikeManager? = null
 ) {
     /**
      * Load track data by combining ytm-kt LoadSong and custom EchoSongEndpoint.
@@ -91,6 +94,15 @@ class EchoEnhancedSongEndpoint(
             // Ensure availability is set
             if (!containsKey("availability")) {
                 put("availability", "public")
+            }
+
+            // Ensure isLiked is merged if known
+            val isLiked = legacyTrack?.extras?.get("isLiked")
+                ?: fallbackTrack.extras["isLiked"]
+                ?: ytmTrack?.extras?.get("isLiked")
+                ?: likeManager?.isCachedLiked(trackId)?.toString()
+            if (isLiked != null && !containsKey("isLiked")) {
+                put("isLiked", isLiked)
             }
             
             println("  final merged isVideo=${get("isVideo")}")

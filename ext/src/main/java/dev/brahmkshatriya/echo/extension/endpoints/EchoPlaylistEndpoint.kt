@@ -17,6 +17,7 @@ import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylist
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylistBuilder
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmSong
 import dev.toastbits.ytmkt.model.internal.TextRun
+import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
 import dev.toastbits.ytmkt.radio.BuiltInRadioContinuation
 import dev.toastbits.ytmkt.radio.RadioContinuation
 import io.ktor.client.call.body
@@ -25,7 +26,10 @@ import io.ktor.client.statement.HttpResponse
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.put
 
-class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
+class EchoPlaylistEndpoint(
+    override val api: YoutubeiApi,
+    private val likeManager: LikeManager? = null
+) : ApiEndpoint() {
 
     val albumShelvesMap = mutableMapOf<String, List<MediaItemLayout>>()
     private val continuationEndpoint = EchoPlaylistContinuationEndpoint(api)
@@ -104,17 +108,39 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
         val albumArtists = resolvedAlbum?.artists.orEmpty()
 
+        val isLikedPlaylist = cleanId(playlistId) == "LM" ||
+            cleanId(playlistId) == "VLLM" ||
+            cleanId(id) == "LM" ||
+            cleanId(id) == "VLLM" ||
+            id == "FEmusic_liked_videos" ||
+            playlistId == "FEmusic_liked_videos" ||
+            playlist.name?.equals("Liked Music", ignoreCase = true) == true ||
+            playlist.name?.equals("Liked Songs", ignoreCase = true) == true ||
+            playlist.name?.equals("Your Likes", ignoreCase = true) == true
+
         val songs = PagedData.Continuous { token ->
             if (token == null) {
                 val ytmSongs = playlist.items ?: emptyList()
                 val sets = playlist.item_set_ids ?: emptyList()
                 Page(
                     ytmSongs.mapIndexed { index, it ->
-                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
-                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
-                            track.copy(artists = albumArtists)
+                        val baseTrack = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        val likedTrack = if (isLikedPlaylist) {
+                            likeManager?.markLiked(baseTrack.id, true)
+                            baseTrack.copy(
+                                extras = baseTrack.extras.toMutableMap().apply { put("isLiked", "true") }
+                            )
+                        } else if (likeManager?.isCachedLiked(baseTrack.id) == true) {
+                            baseTrack.copy(
+                                extras = baseTrack.extras.toMutableMap().apply { put("isLiked", "true") }
+                            )
                         } else {
-                            track
+                            baseTrack
+                        }
+                        if (likedTrack.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            likedTrack.copy(artists = albumArtists)
+                        } else {
+                            likedTrack
                         }
                     },
                     playlist.continuation?.token
@@ -125,11 +151,23 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 val sets = setIds ?: emptyList()
                 Page(
                     ytmSongs.mapIndexed { index, it ->
-                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
-                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
-                            track.copy(artists = albumArtists)
+                        val baseTrack = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        val likedTrack = if (isLikedPlaylist) {
+                            likeManager?.markLiked(baseTrack.id, true)
+                            baseTrack.copy(
+                                extras = baseTrack.extras.toMutableMap().apply { put("isLiked", "true") }
+                            )
+                        } else if (likeManager?.isCachedLiked(baseTrack.id) == true) {
+                            baseTrack.copy(
+                                extras = baseTrack.extras.toMutableMap().apply { put("isLiked", "true") }
+                            )
                         } else {
-                            track
+                            baseTrack
+                        }
+                        if (likedTrack.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            likedTrack.copy(artists = albumArtists)
+                        } else {
+                            likedTrack
                         }
                     },
                     cont

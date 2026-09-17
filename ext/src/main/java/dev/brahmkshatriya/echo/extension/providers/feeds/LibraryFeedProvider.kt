@@ -6,8 +6,10 @@ import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Tab
+import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.auth.YouTubeAuthManager
 import dev.brahmkshatriya.echo.extension.endpoints.EchoLibraryEndPoint
+import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
 import dev.brahmkshatriya.echo.extension.toEchoMediaItem
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
@@ -16,7 +18,8 @@ import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 class LibraryFeedProvider(
     private val api: YoutubeiApi,
     private val authManager: YouTubeAuthManager,
-    private val libraryEndpoint: EchoLibraryEndPoint
+    private val libraryEndpoint: EchoLibraryEndPoint,
+    private val likeManager: LikeManager? = null
 ) {
     suspend fun loadLibraryFeed(thumbnailQuality: ThumbnailProvider.Quality): Feed<Shelf> {
         val tabs = listOf(
@@ -114,8 +117,19 @@ class LibraryFeedProvider(
     ): Page<Shelf> {
         val auth = authManager.requireAuth()
         val (result, ctoken) = libraryEndpoint.loadLibraryFeed(browseId, continuation)
+        val isLikedFeed = browseId.contains("liked_videos", ignoreCase = true) ||
+            browseId == "LM" || browseId == "VLLM"
         val shelves = result.mapNotNull { playlist ->
-            playlist.toEchoMediaItem(false, thumbnailQuality)?.let { Shelf.Item(it) }
+            val mediaItem = playlist.toEchoMediaItem(false, thumbnailQuality)
+            val finalItem = if (isLikedFeed && mediaItem is Track) {
+                likeManager?.markLiked(mediaItem.id, true)
+                mediaItem.copy(extras = mediaItem.extras.toMutableMap().apply { put("isLiked", "true") })
+            } else if (mediaItem is Track && likeManager?.isCachedLiked(mediaItem.id) == true) {
+                mediaItem.copy(extras = mediaItem.extras.toMutableMap().apply { put("isLiked", "true") })
+            } else {
+                mediaItem
+            }
+            finalItem?.let { Shelf.Item(it) }
         }
         return Page(shelves, ctoken)
     }

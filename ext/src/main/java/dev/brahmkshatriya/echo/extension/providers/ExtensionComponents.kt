@@ -53,20 +53,27 @@ class ExtensionComponents(
     val libraryEndpoint = EchoLibraryEndPoint(api)
     val songEndpoint = EchoSongEndPoint(api)
     val songRelatedEndpoint = EchoSongRelatedEndpoint(api)
-    val playlistEndpoint = EchoPlaylistEndpoint(api)
     val lyricsEndpoint = EchoLyricsEndPoint(api)
     val searchSuggestionsEndpoint = EchoSearchSuggestionsEndpoint(api)
     val searchEndpoint = EchoSearchEndpoint(api)
     val editorEndpoint = EchoEditPlaylistEndpoint(api)
-    
-    val enhancedSongEndpoint by lazy {
-        EchoEnhancedSongEndpoint(api, songEndpoint)
-    }
 
     //Services
     
     val authManager by lazy {
         YouTubeAuthManager(api, visitorEndpoint)
+    }
+
+    val likeManager by lazy {
+        LikeManager(api, authManager, json)
+    }
+
+    val playlistEndpoint by lazy {
+        EchoPlaylistEndpoint(api, likeManager)
+    }
+
+    val enhancedSongEndpoint by lazy {
+        EchoEnhancedSongEndpoint(api, songEndpoint, likeManager)
     }
 
     val streamResolver by lazy {
@@ -80,7 +87,7 @@ class ExtensionComponents(
     //providers
 
     val libraryFeedProvider by lazy {
-        LibraryFeedProvider(api, authManager, libraryEndpoint)
+        LibraryFeedProvider(api, authManager, libraryEndpoint, likeManager)
     }
 
     val searchFeedProvider by lazy {
@@ -101,10 +108,6 @@ class ExtensionComponents(
 
     val playlistManager by lazy {
         PlaylistManager(authManager, editorEndpoint, thumbnailQuality)
-    }
-
-    val likeManager by lazy {
-        LikeManager(authManager)
     }
 
     val followManager by lazy {

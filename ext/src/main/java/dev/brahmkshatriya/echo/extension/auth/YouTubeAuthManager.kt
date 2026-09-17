@@ -117,5 +117,5 @@ class YouTubeAuthManager(
         throw ClientException.LoginRequired()
     }
 
-    fun isAuthenticated(): Boolean = api.user_auth_state != null || authState != null
+    fun isAuthenticated(): Boolean = api.user_auth_state != null || authState != null || pendingCredentials != null
 }
