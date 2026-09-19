@@ -53,14 +53,16 @@ class ExtensionComponents(
     val libraryEndpoint = EchoLibraryEndPoint(api)
     val songEndpoint = EchoSongEndPoint(api)
     val songRelatedEndpoint = EchoSongRelatedEndpoint(api)
-    val playlistEndpoint = EchoPlaylistEndpoint(api)
+    val playlistEndpoint by lazy {
+        EchoPlaylistEndpoint(api) { likeManager }
+    }
     val lyricsEndpoint = EchoLyricsEndPoint(api)
     val searchSuggestionsEndpoint = EchoSearchSuggestionsEndpoint(api)
     val searchEndpoint = EchoSearchEndpoint(api)
     val editorEndpoint = EchoEditPlaylistEndpoint(api)
     
     val enhancedSongEndpoint by lazy {
-        EchoEnhancedSongEndpoint(api, songEndpoint)
+        EchoEnhancedSongEndpoint(api, songEndpoint) { likeManager }
     }
 
     //Services
@@ -104,7 +106,7 @@ class ExtensionComponents(
     }
 
     val likeManager by lazy {
-        LikeManager(authManager)
+        LikeManager(api, authManager)
     }
 
     val followManager by lazy {

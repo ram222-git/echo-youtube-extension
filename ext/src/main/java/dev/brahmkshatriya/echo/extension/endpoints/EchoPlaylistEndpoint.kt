@@ -25,7 +25,10 @@ import io.ktor.client.statement.HttpResponse
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.put
 
-class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
+class EchoPlaylistEndpoint(
+    override val api: YoutubeiApi,
+    private val getLikeManager: (() -> dev.brahmkshatriya.echo.extension.providers.social.LikeManager)? = null
+) : ApiEndpoint() {
 
     val albumShelvesMap = mutableMapOf<String, List<MediaItemLayout>>()
     private val continuationEndpoint = EchoPlaylistContinuationEndpoint(api)
@@ -102,6 +105,15 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             )
         } else null
 
+        val isLikedPlaylist = cleanId(playlistId) == "LM" ||
+            cleanId(id) == "LM" ||
+            playlistId == "LM" ||
+            id == "LM" ||
+            playlistId == "FEmusic_liked_videos" ||
+            cleanId(playlistId) == "FEmusic_liked_videos" ||
+            playlist.name?.equals("Liked Music", ignoreCase = true) == true ||
+            playlist.name?.equals("Liked Songs", ignoreCase = true) == true
+
         val albumArtists = resolvedAlbum?.artists.orEmpty()
 
         val songs = PagedData.Continuous { token ->
@@ -110,9 +122,15 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 val sets = playlist.item_set_ids ?: emptyList()
                 Page(
                     ytmSongs.mapIndexed { index, it ->
-                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
-                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
-                            track.copy(artists = albumArtists)
+                        val baseTrack = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        val track = if (baseTrack.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            baseTrack.copy(artists = albumArtists)
+                        } else {
+                            baseTrack
+                        }
+                        if (isLikedPlaylist) {
+                            getLikeManager?.invoke()?.markLiked(track.id, true)
+                            track.copy(extras = track.extras + ("isLiked" to "true"))
                         } else {
                             track
                         }
@@ -125,9 +143,15 @@ class EchoPlaylistEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 val sets = setIds ?: emptyList()
                 Page(
                     ytmSongs.mapIndexed { index, it ->
-                        val track = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
-                        if (track.artists.isEmpty() && albumArtists.isNotEmpty()) {
-                            track.copy(artists = albumArtists)
+                        val baseTrack = it.toTrack(quality, sets.getOrNull(index), albumFallback = resolvedAlbum)
+                        val track = if (baseTrack.artists.isEmpty() && albumArtists.isNotEmpty()) {
+                            baseTrack.copy(artists = albumArtists)
+                        } else {
+                            baseTrack
+                        }
+                        if (isLikedPlaylist) {
+                            getLikeManager?.invoke()?.markLiked(track.id, true)
+                            track.copy(extras = track.extras + ("isLiked" to "true"))
                         } else {
                             track
                         }

@@ -110,7 +110,7 @@ open class EchoSongEndPoint(override val api: YoutubeiApi) : ApiEndpoint() {
         val likeStatus = actions?.firstNotNullOfOrNull { action ->
             action.jsonObject["likeButtonRenderer"]?.jsonObject
                 ?.get("likeStatus")?.jsonPrimitive?.contentOrNull
-        }
+        } ?: Regex("\"likeStatus\"\\s*:\\s*\"([A-Z]+)\"").find(responseText)?.groupValues?.get(1)
         val isLiked = likeStatus == "LIKE"
 
         val video = firstVideoRenderer

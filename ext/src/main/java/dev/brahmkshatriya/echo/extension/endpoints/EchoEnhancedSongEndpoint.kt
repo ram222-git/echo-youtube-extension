@@ -14,7 +14,8 @@ import dev.toastbits.ytmkt.model.external.ThumbnailProvider
  */
 class EchoEnhancedSongEndpoint(
     private val api: YoutubeiApi,
-    private val echoSongEndpoint: EchoSongEndPoint
+    private val echoSongEndpoint: EchoSongEndPoint,
+    private val getLikeManager: (() -> dev.brahmkshatriya.echo.extension.providers.social.LikeManager)? = null
 ) {
     /**
      * Load track data by combining ytm-kt LoadSong and custom EchoSongEndpoint.
@@ -80,6 +81,16 @@ class EchoEnhancedSongEndpoint(
             fallbackTrack.extras.forEach { (k, v) -> put(k, v) }
             legacyTrack?.extras?.forEach { (k, v) -> put(k, v) }
             ytmTrack?.extras?.forEach { (k, v) -> put(k, v) }
+
+            // Propagate cached like status if available
+            getLikeManager?.invoke()?.getCachedLiked(trackId)?.let { isLiked ->
+                put("isLiked", isLiked.toString())
+            }
+
+            // If legacy track had isLiked, cache it in LikeManager
+            legacyTrack?.extras?.get("isLiked")?.toBooleanStrictOrNull()?.let { isLiked ->
+                getLikeManager?.invoke()?.markLiked(trackId, isLiked)
+            }
             
             // Explicitly set isVideo flag if available
             val isVideo = fallbackTrack.extras["isVideo"] 
