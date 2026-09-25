@@ -21,7 +21,11 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
     ): HttpResponse {
         return api.client.request {
             endpointPath("player")
-            addApiHeadersWithoutAuthentication()
+            if (api.user_auth_state != null) {
+                addApiHeadersWithAuthenticated()
+            } else {
+                addApiHeadersWithoutAuthentication()
+            }
             postWithBody(context) {
                 put("videoId", id)
                 put("playlistId", playlist)
