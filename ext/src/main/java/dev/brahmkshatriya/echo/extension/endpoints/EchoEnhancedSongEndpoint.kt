@@ -205,74 +205,36 @@ class EchoEnhancedSongEndpoint(
     
     companion object {
         /**
-         * Create comprehensive streamable configuration with Audio & optional Video choices in Sources.
-         * All qualities are created as Streamable.server so they appear under Sources/Servers with RESIZE_MODE_FIT.
+         * Create streamable configuration with a single "YouTube" server entry for audio,
+         * and optionally a "YouTube Video" server entry.
+         * All actual quality options are exposed as Sources when the server is resolved.
          */
         fun createDefaultStreamables(
             videoId: String,
             enableVideo: Boolean = false
         ): List<Streamable> {
-            val audioStreamables = listOf(
-                // Audio Qualities
-                Streamable.server(
-                    id = "yt_audio_opus_160_$videoId",
-                    quality = 160,
-                    title = "OPUS 160 kbps",
-                    extras = mapOf("videoId" to videoId, "type" to "audio", "codec" to "opus", "bitrate" to "160")
-                ),
-                Streamable.server(
-                    id = "yt_audio_aac_128_$videoId",
-                    quality = 128,
-                    title = "AAC 128 kbps",
-                    extras = mapOf("videoId" to videoId, "type" to "audio", "codec" to "aac", "bitrate" to "128")
-                ),
-                Streamable.server(
-                    id = "yt_audio_opus_70_$videoId",
-                    quality = 70,
-                    title = "OPUS 70 kbps",
-                    extras = mapOf("videoId" to videoId, "type" to "audio", "codec" to "opus", "bitrate" to "70")
-                ),
-                Streamable.server(
-                    id = "yt_audio_aac_48_$videoId",
-                    quality = 48,
-                    title = "AAC 48 kbps",
-                    extras = mapOf("videoId" to videoId, "type" to "audio", "codec" to "aac", "bitrate" to "48")
-                )
+             // Single "YouTube" server — all audio qualities are returned as Sources on resolve
+            val audioServer = Streamable.server(
+                id = "yt_audio_$videoId",
+                quality = 0,
+                title = "YouTube",
+                extras = mapOf("videoId" to videoId, "type" to "audio")
             )
 
             if (!enableVideo) {
-                return audioStreamables
+                return listOf(audioServer)
             }
 
-            val videoStreamables = listOf(
-                // Video Qualities as Servers so they show in Sources with no zoom (FIT)
-                Streamable.server(
-                    id = "yt_video_1080p_$videoId",
-                    quality = 1080,
-                    title = "VIDEO 1080p",
-                    extras = mapOf("videoId" to videoId, "type" to "video", "height" to "1080")
-                ),
-                Streamable.server(
-                    id = "yt_video_720p_$videoId",
-                    quality = 720,
-                    title = "VIDEO 720p",
-                    extras = mapOf("videoId" to videoId, "type" to "video", "height" to "720")
-                ),
-                Streamable.server(
-                    id = "yt_video_480p_$videoId",
-                    quality = 480,
-                    title = "VIDEO 480p",
-                    extras = mapOf("videoId" to videoId, "type" to "video", "height" to "480")
-                ),
-                Streamable.server(
-                    id = "yt_video_360p_$videoId",
-                    quality = 360,
-                    title = "VIDEO 360p",
-                    extras = mapOf("videoId" to videoId, "type" to "video", "height" to "360")
-                )
+            // Single "YouTube Video" server — all video qualities are returned as Sources on resolve
+            val videoServer = Streamable.server(
+                id = "yt_video_$videoId",
+                quality = 0,
+                title = "YouTube Video",
+                extras = mapOf("videoId" to videoId, "type" to "video")
+
             )
 
-            return audioStreamables + videoStreamables
+            return listOf(audioServer, videoServer)
         }
     }
 }

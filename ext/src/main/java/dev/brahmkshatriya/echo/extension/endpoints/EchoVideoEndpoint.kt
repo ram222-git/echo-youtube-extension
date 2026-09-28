@@ -77,6 +77,7 @@ data class PlayabilityStatus(
 data class StreamingData(
     val expiresInSeconds: String? = null,
     val hlsManifestUrl: String? = null,
+    val formats: List<AdaptiveFormat> = emptyList(),
     val adaptiveFormats: List<AdaptiveFormat> = emptyList()
 )
 
