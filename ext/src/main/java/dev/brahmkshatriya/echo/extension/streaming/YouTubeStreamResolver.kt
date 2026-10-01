@@ -21,13 +21,20 @@ class YouTubeStreamResolver(
     
 
     private fun createStreamingRequest(url: String): NetworkRequest {
+        val headers = mutableMapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "*/*",
+            "Range" to "bytes=0-",
+            "Origin" to "https://music.youtube.com",
+            "Referer" to "https://music.youtube.com/"
+        )
+        val cookie = RealNewPipeVideoFormatsEndpoint.globalCookie
+        if (!cookie.isNullOrBlank()) {
+            headers["Cookie"] = cookie
+        }
         return NetworkRequest(
             url = url,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept" to "*/*",
-                "Range" to "bytes=0-"
-            )
+            headers = headers
         )
     }
 
@@ -126,8 +133,18 @@ class YouTubeStreamResolver(
             errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
         }
         
-        // Tier 3: YtmKt MultipleVideoFormatsEndpoint
-        println("RealNewPipe failed, trying YtmKt for video ID: $videoId")
+        // Tier 3: Restricted / Age-Restricted Web Creator Extractor
+        println("Trying Restricted Video Extractor for video ID: $videoId")
+        val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest, targetHeight, targetCodec, targetBitrate)
+        if (restrictedResult is ExtractionResult.Success) {
+            println("Successfully loaded streamable media using Restricted Video Extractor")
+            return restrictedResult.media
+        } else if (restrictedResult is ExtractionResult.Error) {
+            errorReasons.add("Restricted Extractor: ${restrictedResult.reason}")
+        }
+
+        // Tier 4: YtmKt MultipleVideoFormatsEndpoint
+        println("Restricted Extractor failed, trying YtmKt for video ID: $videoId")
         val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest, targetHeight, targetCodec, targetBitrate)
         if (ytmKtResult is ExtractionResult.Success) {
             println("Successfully loaded streamable media using YtmKt library")
@@ -419,5 +436,141 @@ class YouTubeStreamResolver(
         } catch (e: Exception) {
             return ExtractionResult.Error(e.message ?: "Unknown error")
         }
+    }
+
+    private suspend fun tryRestrictedVideoExtractor(
+        videoId: String,
+        isVideoRequest: Boolean,
+        targetHeight: Int?,
+        targetCodec: String?,
+        targetBitrate: Int?
+    ): ExtractionResult {
+        return try {
+            println("RestrictedVideoExtractor: Trying web_creator / restricted player for $videoId")
+            val videoResponse = videoEndpoint.getRestrictedVideo(videoId)
+                ?: return ExtractionResult.Error("Restricted player returned no response")
+            val streamingData = videoResponse.streamingData
+                ?: return ExtractionResult.Error("Restricted player returned no streaming data")
+
+            val allFormats = streamingData.formats + streamingData.adaptiveFormats
+            if (allFormats.isEmpty()) {
+                return ExtractionResult.Error("No formats in restricted player response")
+            }
+
+            // Resolve direct URLs by deciphering signatures if necessary
+            data class ResolvedFormat(
+                val itag: Long,
+                val mimeType: String,
+                val bitrate: Int,
+                val height: Long?,
+                val url: String,
+                val isAudio: Boolean,
+                val isVideo: Boolean
+            )
+
+            val resolved = allFormats.mapNotNull { f ->
+                val cipher = f.signatureCipher ?: f.cipher
+                val url = if (!f.url.isNullOrEmpty()) {
+                    YouTubeSignatureDeobfuscator.deobfuscateStreamUrl(videoId, f.url, null)
+                } else if (!cipher.isNullOrEmpty()) {
+                    deobfuscateCipherUrl(videoId, cipher)
+                } else null
+
+                if (url == null) null
+                else {
+                    val mime = f.mimeType.lowercase()
+                    ResolvedFormat(
+                        itag = f.itag ?: 0L,
+                        mimeType = f.mimeType,
+                        bitrate = f.bitrate,
+                        height = f.height,
+                        url = url,
+                        isAudio = mime.contains("audio/"),
+                        isVideo = mime.contains("video/")
+                    )
+                }
+            }
+
+            if (resolved.isEmpty()) {
+                return ExtractionResult.Error("Failed to decipher any format URLs")
+            }
+
+            if (isVideoRequest) {
+                val reqHeight = targetHeight ?: 720
+                // Check for muxed formats (like format 18: video/mp4)
+                val muxed = resolved.firstOrNull { it.isVideo && !it.isAudio && it.mimeType.contains("mp4a") }
+                    ?: resolved.firstOrNull { it.isVideo && it.itag == 18L }
+                if (muxed != null) {
+                    val muxedSource = Streamable.Source.Http(
+                        request = createStreamingRequest(muxed.url),
+                        type = Streamable.SourceType.Progressive,
+                        quality = muxed.height?.toInt() ?: reqHeight,
+                        title = "Video ${muxed.height ?: reqHeight}p"
+                    )
+                    return ExtractionResult.Success(Streamable.Media.Server(listOf(muxedSource), merged = false))
+                }
+
+                val videos = resolved.filter { it.isVideo }
+                val audios = resolved.filter { it.isAudio }
+                val selectedVideo = videos.minByOrNull { Math.abs((it.height?.toInt() ?: 0) - reqHeight) }
+                    ?: videos.firstOrNull()
+                val bestAudio = audios.maxByOrNull { it.bitrate } ?: audios.firstOrNull()
+
+                if (selectedVideo != null && bestAudio != null) {
+                    val videoSource = Streamable.Source.Http(
+                        request = createStreamingRequest(selectedVideo.url),
+                        type = Streamable.SourceType.Progressive,
+                        quality = selectedVideo.height?.toInt() ?: reqHeight,
+                        title = "Video ${selectedVideo.height ?: reqHeight}p"
+                    )
+                    val audioBitrate = if (bestAudio.bitrate > 0) bestAudio.bitrate / 1000 else 128
+                    val audioSource = Streamable.Source.Http(
+                        request = createStreamingRequest(bestAudio.url),
+                        type = Streamable.SourceType.Progressive,
+                        quality = audioBitrate,
+                        title = "Audio $audioBitrate kbps"
+                    )
+                    return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
+                }
+            }
+
+            // Audio extraction (prefer audio formats; fallback to format 18 muxed if audio-only not deciphered)
+            val audioFormats = resolved.filter { it.isAudio }
+            val selectedFormat = if (audioFormats.isNotEmpty()) {
+                audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.first()
+            } else {
+                resolved.firstOrNull { it.itag == 18L } ?: resolved.first()
+            }
+
+            val bitrateKbps = if (selectedFormat.bitrate > 0) selectedFormat.bitrate / 1000 else 128
+            val singleSource = Streamable.Source.Http(
+                request = createStreamingRequest(selectedFormat.url),
+                type = Streamable.SourceType.Progressive,
+                quality = bitrateKbps,
+                title = if (selectedFormat.isAudio) "Audio $bitrateKbps kbps" else "Muxed Audio"
+            )
+
+            ExtractionResult.Success(Streamable.Media.Server(listOf(singleSource), merged = false))
+        } catch (e: Exception) {
+            println("RestrictedVideoExtractor Exception: ${e.message}")
+            ExtractionResult.Error(e.message ?: "Restricted extraction failed")
+        }
+    }
+
+    private fun deobfuscateCipherUrl(videoId: String, cipherString: String): String? {
+        return runCatching {
+            val params = cipherString.split('&').associate {
+                val parts = it.split('=', limit = 2)
+                parts[0] to (if (parts.size > 1) java.net.URLDecoder.decode(parts[1], "UTF-8") else "")
+            }
+            val rawUrl = params["url"] ?: return@runCatching null
+            val s = params["s"]
+            val sp = params["sp"] ?: "sig"
+
+            YouTubeSignatureDeobfuscator.deobfuscateStreamUrl(videoId, rawUrl, s, sp)
+        }.onFailure {
+            println("deobfuscateCipherUrl error: ${it.javaClass.simpleName} - ${it.message}")
+            it.printStackTrace()
+        }.getOrNull()
     }
 }

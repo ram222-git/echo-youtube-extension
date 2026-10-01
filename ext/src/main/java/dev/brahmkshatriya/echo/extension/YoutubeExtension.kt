@@ -523,7 +523,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             val sapisid = CookieParser.getSapisid(cookieMap)
                 ?: throw Exception("Login Failed SAPISID cookie not found or empty. Please try logging in again.")
             
-            val auth = CookieParser.generateSapisidHash(sapisid)
+            val auth = CookieParser.generateDynamicAuthHeader(cookieMap)
             val headersMap = mutableMapOf("cookie" to cookie, "authorization" to auth)
             val headers = headers { headersMap.forEach { (t, u) -> append(t, u) } }
             return api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
@@ -537,24 +537,30 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override fun setLoginUser(user: User?) {
         if (user == null) {
+            components.authManager.logout()
+            RealNewPipeVideoFormatsEndpoint.globalCookie = null
+            RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = null
             api.user_auth_state = null
         } else {
             val cookie = user.extras["cookie"] ?: throw Exception("No cookie")
-            val auth = user.extras["auth"] ?: throw Exception("No auth")
+            components.authManager.updateCookies(cookie)
+            RealNewPipeVideoFormatsEndpoint.globalCookie = cookie
 
-            val headers = io.ktor.http.headers {
-                append("cookie", cookie)
-                append("authorization", auth)
+            components.authManager.onCookieUpdate = { updatedCookie ->
+                RealNewPipeVideoFormatsEndpoint.globalCookie = updatedCookie
             }
-            val authenticationState =
-                dev.toastbits.ytmkt.impl.youtubei.YoutubeiAuthenticationState(api, headers, user.id.ifEmpty { null })
-            api.user_auth_state = authenticationState
+            RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = { setCookieHeaders ->
+                components.authManager.handleSetCookieHeaders(setCookieHeaders)
+            }
         }
         runCatching { components.likeManager.clearCache() }
         api.visitor_id = runCatching { kotlinx.coroutines.runBlocking { components.visitorEndpoint.getVisitorId() } }.getOrNull()
     }
 
     override suspend fun getCurrentUser(): User? {
+        val user = components.authManager.getCurrentUser().getOrNull()
+        if (user != null) return user
+
         val headers = api.user_auth_state?.headers ?: return null
         return runCatching {
             val response = api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
@@ -572,7 +578,8 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             }
             
             val accountResponse = json.decodeFromString<dev.brahmkshatriya.echo.extension.endpoints.GoogleAccountResponse>(jsonText)
-            val userResponse = accountResponse.getUsers("", "").firstOrNull() ?: return@runCatching null
+            val currentCookie = components.authManager.getActiveCookie() ?: ""
+            val userResponse = accountResponse.getUsers(currentCookie, "").firstOrNull() ?: return@runCatching null
             
             userResponse.copy(
                 subtitle = userResponse.extras["email"] ?: "YouTube Music User",
@@ -580,6 +587,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                     put("isLoggedIn", "true")
                     put("userService", "youtube_music")
                     put("accountType", "google")
+                    if (currentCookie.isNotEmpty()) {
+                        put("cookie", currentCookie)
+                    }
                     put("lastUpdated", System.currentTimeMillis().toString())
                 }
             )

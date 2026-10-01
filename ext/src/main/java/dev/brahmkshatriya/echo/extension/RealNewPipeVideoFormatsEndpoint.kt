@@ -26,6 +26,12 @@ class RealNewPipeVideoFormatsEndpoint {
     companion object {
         @Volatile
         private var initialized = false
+
+        @Volatile
+        var globalCookie: String? = null
+
+        @Volatile
+        var cookieUpdateListener: ((List<String>) -> Unit)? = null
         
         private const val OPUS_DEFAULT_BITRATE = 160000  
         private const val AAC_DEFAULT_BITRATE = 128000  
@@ -48,14 +54,28 @@ class RealNewPipeVideoFormatsEndpoint {
                 NewPipe.init(object : Downloader() {
                     override fun execute(request: Request): Response {
                         val builder = okhttp3.Request.Builder().url(request.url())
+                        val url = request.url()
+                        val isYouTube = url.contains("youtube.com") || url.contains("googlevideo.com")
+
                         request.headers().forEach { (name, values) ->
                             values.forEach { value -> builder.addHeader(name, value) }
                         }
+
+                        val cookie = globalCookie
+                        if (isYouTube && !cookie.isNullOrBlank() && !request.headers().containsKey("Cookie") && !request.headers().containsKey("cookie")) {
+                            builder.addHeader("Cookie", cookie)
+                        }
+
                         request.dataToSend()?.let { data ->
                             builder.post(data.toRequestBody(null))
                         }
 
                         val response = httpClient.newCall(builder.build()).execute()
+                        val setCookies = response.headers("Set-Cookie")
+                        if (setCookies.isNotEmpty()) {
+                            cookieUpdateListener?.invoke(setCookies)
+                        }
+
                         val body = response.body?.string()
                         return Response(
                             response.code,
@@ -68,7 +88,7 @@ class RealNewPipeVideoFormatsEndpoint {
                 })
 
                 initialized = true
-                println("Initialized with OkHttp downloader")
+                println("Initialized with OkHttp downloader and cookie support")
             }
         }
     }

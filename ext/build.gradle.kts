@@ -28,6 +28,7 @@ dependencies {
         excludeKotlin()
     }  
     implementation(libs.newpipe) { excludeKotlin() }
+    implementation(libs.rhino) { excludeKotlin() }
     implementation(libs.ktor.client.core) { excludeKotlin() }
     implementation(libs.ktor.client.cio) { excludeKotlin() }
     implementation(libs.ktor.client.content.negotiation) { excludeKotlin() }
