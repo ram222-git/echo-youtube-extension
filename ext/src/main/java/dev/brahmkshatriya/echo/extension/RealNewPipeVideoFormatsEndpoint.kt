@@ -93,14 +93,21 @@ class RealNewPipeVideoFormatsEndpoint {
         }
     }
 
+    data class ExtractedStreams(
+        val muxed: List<YoutubeVideoFormat>,
+        val videoOnly: List<YoutubeVideoFormat>,
+        val audio: List<YoutubeVideoFormat>,
+        val hlsUrl: String? = null
+    )
+
     /**
-     * Single-shot fetch: returns (muxedFormats, videoOnlyFormats, audioFormats) in one StreamInfo.getInfo call.
+     * Single-shot fetch: returns ExtractedStreams in one StreamInfo.getInfo call.
      * All other public methods delegate to this to avoid duplicate network round-trips.
      */
     private suspend fun fetchAllStreams(
         videoId: String,
         maxQuality: Int? = null
-    ): Triple<List<YoutubeVideoFormat>, List<YoutubeVideoFormat>, List<YoutubeVideoFormat>> {
+    ): ExtractedStreams {
         ensureInitialized()
 
         val url = "https://www.youtube.com/watch?v=$videoId"
@@ -198,8 +205,9 @@ class RealNewPipeVideoFormatsEndpoint {
                     .thenByDescending { it.bitrate }
             )
 
-        println("Fetched: ${muxedFormats.size} muxed, ${videoOnlyFormats.size} video-only, ${audioFormats.size} audio")
-        return Triple(muxedFormats, videoOnlyFormats, audioFormats)
+        val hlsUrl = streamInfo.hlsUrl
+        println("Fetched: ${muxedFormats.size} muxed, ${videoOnlyFormats.size} video-only, ${audioFormats.size} audio, hls: ${hlsUrl != null}")
+        return ExtractedStreams(muxedFormats, videoOnlyFormats, audioFormats, hlsUrl)
     }
 
     /**
@@ -209,11 +217,11 @@ class RealNewPipeVideoFormatsEndpoint {
         videoId: String,
         maxQuality: Int? = null
     ): Result<Pair<List<YoutubeVideoFormat>, List<YoutubeVideoFormat>>> = runCatching {
-        val (_, videoOnly, audio) = fetchAllStreams(videoId, maxQuality)
-        if (videoOnly.isEmpty() && audio.isEmpty()) {
+        val streams = fetchAllStreams(videoId, maxQuality)
+        if (streams.videoOnly.isEmpty() && streams.audio.isEmpty()) {
             throw Exception("No valid streams found for $videoId")
         }
-        Pair(videoOnly, audio)
+        Pair(streams.videoOnly, streams.audio)
     }
 
     /**
@@ -222,9 +230,9 @@ class RealNewPipeVideoFormatsEndpoint {
     suspend fun getMuxedVideoStreams(
         videoId: String
     ): Result<List<YoutubeVideoFormat>> = runCatching {
-        val (muxed, _, _) = fetchAllStreams(videoId)
-        if (muxed.isEmpty()) throw Exception("No muxed video+audio streams found for $videoId")
-        muxed
+        val streams = fetchAllStreams(videoId)
+        if (streams.muxed.isEmpty()) throw Exception("No muxed video+audio streams found for $videoId")
+        streams.muxed
     }
 
     /**
@@ -233,19 +241,19 @@ class RealNewPipeVideoFormatsEndpoint {
     suspend fun getAudioFormats(
         videoId: String
     ): Result<List<YoutubeVideoFormat>> = runCatching {
-        val (_, _, audio) = fetchAllStreams(videoId)
-        if (audio.isEmpty()) throw Exception("No audio streams found for $videoId")
-        audio
+        val streams = fetchAllStreams(videoId)
+        if (streams.audio.isEmpty()) throw Exception("No audio streams found for $videoId")
+        streams.audio
     }
 
     /**
-     * Returns all three stream types in one call — use this in resolvers that need both muxed+separate
+     * Returns all stream types in one call — use this in resolvers that need both muxed+separate
      * to avoid double network fetches.
      */
     suspend fun getAllStreams(
         videoId: String,
         maxQuality: Int? = null
-    ): Result<Triple<List<YoutubeVideoFormat>, List<YoutubeVideoFormat>, List<YoutubeVideoFormat>>> =
+    ): Result<ExtractedStreams> =
         runCatching { fetchAllStreams(videoId, maxQuality) }
     
     fun close() {
