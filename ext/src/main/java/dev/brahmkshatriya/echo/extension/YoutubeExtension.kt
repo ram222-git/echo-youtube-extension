@@ -46,9 +46,11 @@ import dev.brahmkshatriya.echo.common.models.Track.Type
 import dev.brahmkshatriya.echo.common.models.Track.Playable
 import dev.brahmkshatriya.echo.common.models.TrackDetails
 import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
+import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistMoreEndpoint
@@ -88,7 +90,7 @@ private fun createShelfPagedDataFromMediaItems(mediaItems: PagedData<EchoMediaIt
 class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFeedClient,
     RadioClient, AlbumClient, ArtistClient, PlaylistClient, LoginClient.WebView,
     TrackerClient, TrackerMarkClient, LibraryFeedClient, ShareClient, LyricsClient, FollowClient,
-    LikeClient, PlaylistEditClient, LyricsSearchClient, QuickSearchClient {
+    LikeClient, PlaylistEditClient, LyricsSearchClient, QuickSearchClient, SettingsChangeListenerClient {
 
     override suspend fun getSettingItems(): List<Setting> = listOf(
         SettingSwitch(
@@ -108,6 +110,12 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "send_back_to_google",
             "Upload listening history to YouTube Music to improve recommendations and stats (works when logged in).",
             true
+        ),
+        SettingTextInput(
+            "Custom YouTube Cookies",
+            "custom_cookies",
+            "Paste raw YouTube cookies (e.g. SAPISID=...; SID=...) to enable restricted playback and test without WebView login.",
+            ""
         )
     )
 
@@ -115,6 +123,32 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     override fun setSettings(settings: Settings) {
         this.settings = settings
         components = ExtensionComponents(api, settings, json)
+        applyCustomCookies()
+    }
+
+    override suspend fun onSettingsChanged(settings: Settings, key: String?) {
+        this.settings = settings
+        if (key == null || key == "custom_cookies") {
+            applyCustomCookies()
+        }
+    }
+
+    private fun applyCustomCookies() {
+        val raw = settings.getString("custom_cookies")?.trim()
+            ?.removeSurrounding("\"")
+            ?.removeSurrounding("'")
+            ?.trim()
+        if (!raw.isNullOrBlank()) {
+            println("YoutubeExtension: Applying custom cookies from settings (length: ${raw.length})")
+            components.authManager.updateCookies(raw)
+            RealNewPipeVideoFormatsEndpoint.globalCookie = raw
+            components.authManager.onCookieUpdate = { updatedCookie ->
+                RealNewPipeVideoFormatsEndpoint.globalCookie = updatedCookie
+            }
+            RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = { setCookieHeaders ->
+                components.authManager.handleSetCookieHeaders(setCookieHeaders)
+            }
+        }
     }
 
     val api = YoutubeiApi(

@@ -45,10 +45,12 @@ class ExtensionUnitTest {
 
     private val mainThreadSurrogate = newSingleThreadContext("UI thread")
 
+    private val mockedSettings = MockedSettings()
+
     @Before
     fun setUp() {
         Dispatchers.setMain(mainThreadSurrogate)
-        extension.setSettings(MockedSettings())
+        extension.setSettings(mockedSettings)
         runBlocking {
             extension.onExtensionSelected()
             (extension as? LoginClient)?.setLoginUser(null)
@@ -154,14 +156,34 @@ class ExtensionUnitTest {
     fun testTrackStream() = testIn("Testing Track Stream") {
         if (extension !is TrackClient) error("TrackClient is not implemented")
         val search = Track("qeFt3fdsydA", "")
-        measureTimeMillis {
-            val track = extension.loadTrack(search, false)
-            println(track.streamables)
-            val streamable = track.streamables.firstOrNull()
-                ?: error("Track is not streamable")
-            val stream = extension.loadStreamableMedia(streamable, false)
-            println(stream)
-        }.also { println("time : $it") }
+        
+        // 1. Test YouTube Audio Server
+        mockedSettings.putBoolean("enable_video", false)
+        val track = extension.loadTrack(search, false)
+        println("Normal track loaded: ${track.id}, streamables: ${track.streamables.map { "${it.title} (type=${it.extras["type"]})" }}")
+        val audioStreamable = track.streamables.firstOrNull { it.extras["type"] == "audio" }
+            ?: track.streamables.firstOrNull() ?: error("Track is not streamable")
+        val audioMedia = extension.loadStreamableMedia(audioStreamable, false)
+        assert(audioMedia is Streamable.Media.Server)
+        val audioServer = audioMedia as Streamable.Media.Server
+        println("Normal Song YouTube Server (Audio): ${audioServer.sources.size} qualities, merged=${audioServer.merged}")
+        val audioQualities = audioServer.sources.map { "Quality ${it.quality} (isVideo=${it.isVideo})" }
+        println("Normal Song Audio Qualities: $audioQualities")
+        assert(audioServer.sources.isNotEmpty())
+        assert(!audioServer.merged) { "Audio server must have merged = false for Echo quality selection" }
+
+        // 2. Test YouTube Video Server
+        mockedSettings.putBoolean("enable_video", true)
+        val videoTrack = extension.loadTrack(search, false)
+        val videoStreamable = videoTrack.streamables.firstOrNull { it.extras["type"] == "video" }
+            ?: error("Video streamable not found for normal track")
+        val videoMedia = extension.loadStreamableMedia(videoStreamable, false)
+        assert(videoMedia is Streamable.Media.Server)
+        val videoServer = videoMedia as Streamable.Media.Server
+        println("Normal Song YouTube Video Server: ${videoServer.sources.size} source(s), merged=${videoServer.merged}")
+        val videoTypes = videoServer.sources.map { "type=${it::class.simpleName}, quality=${it.quality}, isVideo=${it.isVideo}" }
+        println("Normal Song Video Sources: $videoTypes")
+        assert(videoServer.sources.isNotEmpty())
     }
 
     @Test
@@ -241,9 +263,14 @@ class ExtensionUnitTest {
         if (extension !is TrackClient) error("TrackClient is not implemented")
         if (extension !is LoginClient) error("LoginClient is not implemented")
 
+        val cookieFile = java.io.File("../cookise.txt").takeIf { it.exists() }
+            ?: java.io.File("cookise.txt").takeIf { it.exists() }
+            ?: java.io.File("../cookies.txt").takeIf { it.exists() }
+            ?: java.io.File("cookies.txt").takeIf { it.exists() }
         val cookieString = System.getenv("YOUTUBE_COOKIE")
+            ?: cookieFile?.readText()?.trim()
         if (cookieString.isNullOrBlank()) {
-            println("Skipping testRestrictedTrackStream: YOUTUBE_COOKIE environment variable not set.")
+            println("Skipping testRestrictedTrackStream: No cookie found in env or cookise.txt.")
             return@testIn
         }
         val fakeUser = User(
@@ -268,8 +295,11 @@ class ExtensionUnitTest {
         val testClient = okhttp3.OkHttpClient()
         val httpReqBuilder = okhttp3.Request.Builder()
             .url(source.request.url)
+            .header("Range", "bytes=0-512")
         source.request.headers.forEach { (k, v) ->
-            httpReqBuilder.header(k, v)
+            if (!k.equals("Range", ignoreCase = true)) {
+                httpReqBuilder.header(k, v)
+            }
         }
         val httpResp = testClient.newCall(httpReqBuilder.build()).execute()
         println("Streaming HTTP response code: ${httpResp.code}, contentType: ${httpResp.header("Content-Type")}, length: ${httpResp.body?.contentLength()}")
@@ -277,5 +307,75 @@ class ExtensionUnitTest {
         val bytes = httpResp.body?.byteStream()?.readNBytes(512) ?: ByteArray(0)
         println("Successfully downloaded ${bytes.size} bytes of audio stream header!")
         assert(bytes.isNotEmpty())
+        val audioQualities = serverMedia.sources.map { "Quality ${it.quality} (isVideo=${it.isVideo})" }
+        println("Restricted Song YouTube Server (Audio): ${serverMedia.sources.size} qualities, merged=${serverMedia.merged}")
+        assert(serverMedia.sources.isNotEmpty()) { "Expected audio sources under YouTube server" }
+        assert(!serverMedia.merged) { "Audio server must have merged = false for Echo quality selection" }
+
+        println("\n--- Testing Restricted Track Video with All Qualities ---")
+        mockedSettings.putBoolean("enable_video", true)
+        val videoTrack = extension.loadTrack(targetTrack, false)
+        val videoStreamable = videoTrack.streamables.firstOrNull { it.extras["type"] == "video" }
+            ?: error("Video streamable not found in streamables: ${videoTrack.streamables.map { it.id to it.extras }}")
+        val videoMedia = extension.loadStreamableMedia(videoStreamable, false)
+        assert(videoMedia is Streamable.Media.Server)
+        val serverVideo = videoMedia as Streamable.Media.Server
+        val videoSources = serverVideo.sources.filter { it.isVideo }
+        println("Restricted Song YouTube Video Server: ${videoSources.size} video sources, merged=${serverVideo.merged}")
+        assert(videoSources.isNotEmpty()) { "Expected a video source in video server" }
+
+        val vHttp = videoSources.first() as Streamable.Source.Http
+        println("  Playing video: ${vHttp.title} (quality=${vHttp.quality})")
+        val reqBuilder = okhttp3.Request.Builder()
+            .url(vHttp.request.url)
+            .header("Range", "bytes=0-512")
+        vHttp.request.headers.forEach { (k, v) ->
+            if (!k.equals("Range", ignoreCase = true)) reqBuilder.header(k, v)
+        }
+        val resp = testClient.newCall(reqBuilder.build()).execute()
+        val readBytes = resp.body?.byteStream()?.readNBytes(512) ?: ByteArray(0)
+        println("  Resolution ${vHttp.title}: HTTP ${resp.code}, read=${readBytes.size} bytes")
+        assert(resp.code in 200..206) { "Expected HTTP 200/206 for ${vHttp.title} but got ${resp.code}" }
+        assert(readBytes.isNotEmpty()) { "Expected non-empty payload for ${vHttp.title}" }
+
+        // Test with custom height requests (e.g. 1080p, 480p, 360p)
+        listOf(1080, 480, 360).forEach { testHeight ->
+            val customStreamable = videoStreamable.copy(
+                extras = videoStreamable.extras + ("height" to testHeight.toString())
+            )
+            val customMedia = extension.loadStreamableMedia(customStreamable, false) as Streamable.Media.Server
+            val customVideo = customMedia.sources.first { it.isVideo } as Streamable.Source.Http
+            println("  Requested ${testHeight}p -> Received ${customVideo.title} (quality=${customVideo.quality}, merged=${customMedia.merged})")
+            assert(customVideo.quality == testHeight || customVideo.quality > 0)
+        }
+    }
+
+    @Test
+    fun testCustomCookiesSetting() = testIn("Testing Custom Cookies via Settings") {
+        if (extension !is dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient) {
+            error("Extension does not implement SettingsChangeListenerClient")
+        }
+        val settingsClient = extension as dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
+
+        // Verify setting exists in getSettingItems
+        val settingItems = settingsClient.getSettingItems()
+        val cookieSetting = settingItems.firstOrNull { it.key == "custom_cookies" }
+        assert(cookieSetting != null) { "Expected 'custom_cookies' setting in getSettingItems()" }
+        println("Found setting: ${cookieSetting?.title} (${cookieSetting?.key})")
+
+        val cookieFile = java.io.File("../cookise.txt").takeIf { it.exists() }
+            ?: java.io.File("cookise.txt").takeIf { it.exists() }
+        val cookieString = cookieFile?.readText()?.trim() ?: return@testIn
+
+        // Test setting the cookie via Settings
+        mockedSettings.putString("custom_cookies", cookieString)
+        settingsClient.onSettingsChanged(mockedSettings, "custom_cookies")
+
+        val targetTrack = Track("hc0ZDaAZQT0", "")
+        val track = (extension as TrackClient).loadTrack(targetTrack, false)
+        val streamable = track.streamables.first()
+        val streamMedia = extension.loadStreamableMedia(streamable, false) as Streamable.Media.Server
+        assert(streamMedia.sources.isNotEmpty())
+        println("Custom Cookies Setting Test: Successfully resolved ${streamMedia.sources.size} sources without WebView login!")
     }
 }

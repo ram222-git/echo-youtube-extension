@@ -73,7 +73,22 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
     suspend fun getRestrictedVideo(id: String, cookie: String? = null): YoutubeFormatResponse? {
         val userCookie = cookie ?: dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
-        return tryWebRemix(id, userCookie) ?: tryWebCreator(id, userCookie) ?: tryTvClient(id, userCookie)
+        println("EchoVideoEndpoint: getRestrictedVideo for $id. Cookie present: ${!userCookie.isNullOrBlank()}, length: ${userCookie?.length ?: 0}")
+        if (!userCookie.isNullOrBlank()) {
+            val cookieMap = dev.brahmkshatriya.echo.extension.utils.CookieParser.parse(userCookie)
+            println("EchoVideoEndpoint: Cookie keys (${cookieMap.size}): ${cookieMap.keys}")
+        } else {
+            println("EchoVideoEndpoint: WARNING - No cookie found in globalCookie or user_auth_state! Age-restricted videos require login cookies.")
+        }
+        val remixResp = tryWebRemix(id, userCookie)
+        if (remixResp != null) return remixResp
+
+        println("EchoVideoEndpoint: tryWebRemix failed to return formats, falling back to tryWebCreator...")
+        val creatorResp = tryWebCreator(id, userCookie)
+        if (creatorResp != null) return creatorResp
+
+        println("EchoVideoEndpoint: tryWebCreator failed, falling back to tryTvClient...")
+        return tryTvClient(id, userCookie)
     }
 
     private suspend fun tryWebRemix(id: String, cookie: String?): YoutubeFormatResponse? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -103,7 +118,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 dev.brahmkshatriya.echo.extension.utils.CookieParser.generateDynamicAuthHeader(cookieMap, "https://music.youtube.com")
             } else ""
 
-
+            println("tryWebRemix: Sending request for $id. Cookie length: ${cookie?.length ?: 0}, AuthHeader present: ${authHeader.isNotBlank()}")
 
             val requestBuilder = okhttp3.Request.Builder()
                 .url("https://music.youtube.com/youtubei/v1/player")
@@ -135,7 +150,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             }
 
             val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
-            println("tryWebRemix resp: status=${resp.playabilityStatus?.status}, reason=${resp.playabilityStatus?.reason}, formats=${resp.streamingData?.formats?.size}, adaptive=${resp.streamingData?.adaptiveFormats?.size}")
+            println("tryWebRemix resp: status=${resp.playabilityStatus?.status}, reason=${resp.playabilityStatus?.reason}, formats=${resp.streamingData?.formats?.size ?: 0}, adaptive=${resp.streamingData?.adaptiveFormats?.size ?: 0}")
             val formats = resp.streamingData?.formats.orEmpty() + resp.streamingData?.adaptiveFormats.orEmpty()
             if (formats.isNotEmpty()) resp else null
         }.onFailure {
@@ -271,6 +286,7 @@ data class PlayabilityStatus(
 data class StreamingData(
     val expiresInSeconds: String? = null,
     val hlsManifestUrl: String? = null,
+    val dashManifestUrl: String? = null,
     val formats: List<AdaptiveFormat> = emptyList(),
     val adaptiveFormats: List<AdaptiveFormat> = emptyList()
 )
