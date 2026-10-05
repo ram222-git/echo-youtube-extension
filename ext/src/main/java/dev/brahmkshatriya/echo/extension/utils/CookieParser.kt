@@ -52,55 +52,33 @@ object CookieParser {
             ?: cookieMap["__Secure-1PAPISID"]?.takeIf { it.isNotEmpty() }
     }
 
+    private fun sha1Hex(input: String): String {
+        return MessageDigest.getInstance("SHA-1")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
+    }
+
+    private fun formatSapisidHash(prefix: String, sapisid: String, origin: String, timestamp: Long): String {
+        val hash = sha1Hex("$timestamp $sapisid $origin")
+        return "$prefix ${timestamp}_$hash"
+    }
+
     /**
      * Generate standard SAPISIDHASH for YouTube Music API authentication.
      */
     fun generateSapisidHash(sapisid: String, origin: String = "https://music.youtube.com"): String {
         val currentTime = System.currentTimeMillis() / 1000
-        val str = "$currentTime $sapisid $origin"
-        val idHash = MessageDigest.getInstance("SHA-1").digest(str.toByteArray())
-            .joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
-        return "SAPISIDHASH ${currentTime}_${idHash}"
+        return formatSapisidHash("SAPISIDHASH", sapisid, origin, currentTime)
     }
 
     /**
      * Generates a fresh dynamic Authorization header with current timestamp.
-     * Includes SAPISIDHASH, SAPISID1PHASH, and SAPISID3PHASH if available.
-     * This ensures the auth token never expires between requests.
+     * Uses SAPISID (or 3P/1P fallback) to produce a single standard SAPISIDHASH.
+     * This ensures the auth token never expires between requests and matches YouTube's expected format.
      */
     fun generateDynamicAuthHeader(cookieMap: Map<String, String>, origin: String = "https://music.youtube.com"): String {
-        val currentTime = System.currentTimeMillis() / 1000
-        val parts = mutableListOf<String>()
-
-        val sapisid = cookieMap["SAPISID"]
-        if (!sapisid.isNullOrEmpty()) {
-            val str = "$currentTime $sapisid $origin"
-            val idHash = MessageDigest.getInstance("SHA-1").digest(str.toByteArray())
-                .joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
-            parts.add("SAPISIDHASH ${currentTime}_${idHash}")
-        }
-
-        val sapisid1p = cookieMap["__Secure-1PAPISID"]
-        if (!sapisid1p.isNullOrEmpty()) {
-            val str = "$currentTime $sapisid1p $origin"
-            val idHash = MessageDigest.getInstance("SHA-1").digest(str.toByteArray())
-                .joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
-            parts.add("SAPISID1PHASH ${currentTime}_${idHash}")
-        }
-
-        val sapisid3p = cookieMap["__Secure-3PAPISID"]
-        if (!sapisid3p.isNullOrEmpty()) {
-            val str = "$currentTime $sapisid3p $origin"
-            val idHash = MessageDigest.getInstance("SHA-1").digest(str.toByteArray())
-                .joinToString(separator = "") { eachByte -> "%02x".format(eachByte) }
-            parts.add("SAPISID3PHASH ${currentTime}_${idHash}")
-        }
-
-        return if (parts.isNotEmpty()) parts.joinToString(" ") else {
-            // Fallback
-            val anySapisid = getSapisid(cookieMap) ?: return ""
-            generateSapisidHash(anySapisid, origin)
-        }
+        val sapisid = getSapisid(cookieMap) ?: return ""
+        return generateSapisidHash(sapisid, origin)
     }
 
     fun hasValidSapisid(cookie: String): Boolean {

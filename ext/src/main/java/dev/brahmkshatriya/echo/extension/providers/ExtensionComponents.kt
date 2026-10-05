@@ -3,9 +3,22 @@ package dev.brahmkshatriya.echo.extension.providers
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Settings
-import dev.brahmkshatriya.echo.extension.YoutubeExtension
 import dev.brahmkshatriya.echo.extension.auth.YouTubeAuthManager
-import dev.brahmkshatriya.echo.extension.endpoints.*
+import dev.brahmkshatriya.echo.extension.endpoints.EchoAccountEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistMoreEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoEditPlaylistEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoEnhancedSongEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoLibraryEndPoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoLyricsEndPoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoPlaylistEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoSearchEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoSearchSuggestionsEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoSongEndPoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoSongFeedEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoSongRelatedEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoVideoEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
 import dev.brahmkshatriya.echo.extension.providers.feeds.LibraryFeedProvider
 import dev.brahmkshatriya.echo.extension.providers.feeds.SearchFeedProvider
 import dev.brahmkshatriya.echo.extension.providers.playback.PlaybackTracker
@@ -60,6 +73,7 @@ class ExtensionComponents(
     val searchSuggestionsEndpoint = EchoSearchSuggestionsEndpoint(api)
     val searchEndpoint = EchoSearchEndpoint(api)
     val editorEndpoint = EchoEditPlaylistEndpoint(api)
+    val accountEndpoint = EchoAccountEndpoint(api)
     
     val enhancedSongEndpoint by lazy {
         EchoEnhancedSongEndpoint(api, songEndpoint) { likeManager }
@@ -68,7 +82,7 @@ class ExtensionComponents(
     //Services
     
     val authManager by lazy {
-        YouTubeAuthManager(api, visitorEndpoint)
+        YouTubeAuthManager(api, visitorEndpoint, accountEndpoint)
     }
 
     val streamResolver by lazy {

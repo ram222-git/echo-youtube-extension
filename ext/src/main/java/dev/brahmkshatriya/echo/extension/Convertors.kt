@@ -474,11 +474,73 @@ private fun parseYearString(yearValue: Any): Date? {
     }
 }
 
-val json = Json { ignoreUnknownKeys = true }
+fun createFallbackUsers(
+    cookie: String,
+    auth: String,
+    htmlText: String? = null
+): List<User> {
+    var name = "YouTube Music User"
+    var cover: ImageHolder? = null
+    var email: String? = null
+    var channelId = ""
+
+    if (!htmlText.isNullOrEmpty()) {
+        val avatarUrl = """(https://lh3\.googleusercontent\.com/[a-zA-Z0-9_-]+)""".toRegex()
+            .find(htmlText)?.groupValues?.get(1)
+        if (avatarUrl != null) {
+            cover = avatarUrl.toImageHolder()
+        }
+
+        val nameMatch = """"accountName"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]+)"""".toRegex()
+            .find(htmlText)?.groupValues?.get(1)
+            ?: """"NAME"\s*:\s*"([^"]+)"""".toRegex().find(htmlText)?.groupValues?.get(1)
+        if (nameMatch != null) {
+            name = nameMatch
+        }
+
+        val emailMatch = """([a-zA-Z0-9._%+-]+@(?:gmail\.com|googlemail\.com|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))""".toRegex()
+            .find(htmlText)?.groupValues?.get(1)
+        if (emailMatch != null) {
+            email = emailMatch
+        }
+
+        val chMatch = """"channelId"\s*:\s*"([^"]+)"""".toRegex().find(htmlText)?.groupValues?.get(1)
+        if (chMatch != null) {
+            channelId = if (chMatch.startsWith("UC")) chMatch else "UC$chMatch"
+        }
+    }
+
+    val user = User(
+        id = channelId,
+        name = name,
+        cover = cover,
+        subtitle = "YouTube Music",
+        extras = mapOf(
+            "auth" to auth,
+            "cookie" to cookie,
+            "isLoggedIn" to "true",
+            "userService" to "youtube_music",
+            "accountType" to "google"
+        )
+    )
+    return listOf(user)
+}
+
+val json = Json { 
+    ignoreUnknownKeys = true 
+    isLenient = true
+}
+
 suspend fun HttpResponse.getUsers(
     cookie: String,
     auth: String
-) = bodyAsText().let {
-    val trimmed = it.substringAfter(")]}'")
-    json.decodeFromString<GoogleAccountResponse>(trimmed)
-}.getUsers(cookie, auth)
+): List<User> {
+    val text = bodyAsText()
+    val users = GoogleAccountResponse.parseUsers(text, cookie, auth)
+    if (users.isNotEmpty() && users.any { it.name != "YouTube Music User" }) {
+        return users
+    }
+
+    val trimmed = if (text.contains(")]}'")) text.substringAfter(")]}'").trim() else text.trim()
+    return if (users.isNotEmpty()) users else createFallbackUsers(cookie, auth, trimmed)
+}

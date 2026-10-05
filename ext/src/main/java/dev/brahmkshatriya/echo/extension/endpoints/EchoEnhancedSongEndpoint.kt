@@ -4,7 +4,8 @@ import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
-import dev.brahmkshatriya.echo.extension.toTrack
+import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
+import dev.brahmkshatriya.echo.extension.utils.ArtistUtils
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 
@@ -13,9 +14,9 @@ import dev.toastbits.ytmkt.model.external.ThumbnailProvider
  * Optimized to try ytm-kt first, then conditionally fetch legacy if needed.
  */
 class EchoEnhancedSongEndpoint(
-    private val api: YoutubeiApi,
+    @Suppress("unused") private val api: YoutubeiApi,
     private val echoSongEndpoint: EchoSongEndPoint,
-    private val getLikeManager: (() -> dev.brahmkshatriya.echo.extension.providers.social.LikeManager)? = null
+    private val getLikeManager: (() -> LikeManager)? = null
 ) {
     /**
      * Load track data by combining ytm-kt LoadSong and custom EchoSongEndpoint.
@@ -39,7 +40,7 @@ class EchoEnhancedSongEndpoint(
         // Secondary metadata (lyrics, related items) will be loaded lazily on-demand.
         if (fallbackTrack.title.isNotBlank()) {
             println("EchoEnhancedSongEndpoint: Fast-path returning track without blocking network calls")
-            val mergedExtras = buildMergedExtras(null, null, trackId, fallbackTrack)
+            val mergedExtras = buildMergedExtras(null, trackId, fallbackTrack)
             return fallbackTrack.copy(
                 artists = if (fallbackTrack.artists.isNotEmpty()) {
                     sanitizeArtists(fallbackTrack.artists, fallbackTrack.title)
@@ -58,29 +59,27 @@ class EchoEnhancedSongEndpoint(
             it.printStackTrace()
         }.getOrNull()
 
-        val mergedExtras = buildMergedExtras(null, loadedTrack, trackId, fallbackTrack)
+        val mergedExtras = buildMergedExtras(loadedTrack, trackId, fallbackTrack)
         return when {
             loadedTrack != null -> mergeWithLegacyPriority(loadedTrack, fallbackTrack, mergedExtras, enableVideo)
             else -> createFallbackTrack(fallbackTrack, mergedExtras, trackId, enableVideo)
         }
     }
-    
+
     /**
      * Build merged extras map from all available sources.
      */
     private fun buildMergedExtras(
-        ytmTrack: Track?,
         legacyTrack: Track?,
         trackId: String,
         fallbackTrack: Track
     ): Map<String, String> {
         return buildMap {
             put("videoId", trackId)
-            
-            // Prefer ytm-kt extras, then legacy, then fallback
+
+            // Prefer legacy extras, then fallback
             fallbackTrack.extras.forEach { (k, v) -> put(k, v) }
             legacyTrack?.extras?.forEach { (k, v) -> put(k, v) }
-            ytmTrack?.extras?.forEach { (k, v) -> put(k, v) }
 
             // Propagate cached like status if available
             getLikeManager?.invoke()?.getCachedLiked(trackId)?.let { isLiked ->
@@ -91,56 +90,20 @@ class EchoEnhancedSongEndpoint(
             legacyTrack?.extras?.get("isLiked")?.toBooleanStrictOrNull()?.let { isLiked ->
                 getLikeManager?.invoke()?.markLiked(trackId, isLiked)
             }
-            
+
             // Explicitly set isVideo flag if available
-            val isVideo = fallbackTrack.extras["isVideo"] 
+            val isVideo = fallbackTrack.extras["isVideo"]
                 ?: legacyTrack?.extras?.get("isVideo")
-                ?: ytmTrack?.extras?.get("isVideo")
                 ?: "false"
             put("isVideo", isVideo)
-            
+
             // Ensure availability is set
             if (!containsKey("availability")) {
                 put("availability", "public")
             }
-            
+
             println("  final merged isVideo=${get("isVideo")}")
         }
-    }
-    
-    /**
-     * Merge strategy when ytm-kt track is available (preferred source).
-     * Falls back to legacy/original track for missing fields.
-     */
-    private fun mergeWithYtmPriority(
-        ytmTrack: Track,
-        legacyTrack: Track?,
-        fallbackTrack: Track,
-        mergedExtras: Map<String, String>,
-        enableVideo: Boolean = false
-    ): Track {
-        val streamables = createDefaultStreamables(mergedExtras["videoId"] ?: ytmTrack.id, enableVideo)
-        
-        return ytmTrack.copy(
-            cover = ytmTrack.cover ?: fallbackTrack.cover ?: legacyTrack?.cover,
-            album = resolveBestAlbum(ytmTrack.album, legacyTrack?.album, fallbackTrack.album),
-            artists = run {
-                val ytmValid = sanitizeArtists(ytmTrack.artists, ytmTrack.title)
-                val legacyValid = sanitizeArtists(legacyTrack?.artists.orEmpty(), ytmTrack.title)
-                val fallbackValid = sanitizeArtists(fallbackTrack.artists, ytmTrack.title)
-
-                when {
-                    ytmValid.isNotEmpty() -> ytmValid
-                    legacyValid.isNotEmpty() -> legacyValid
-                    fallbackValid.isNotEmpty() -> fallbackValid
-                    else -> sanitizeArtists(fallbackTrack.artists.ifEmpty { legacyTrack?.artists ?: ytmTrack.artists }, ytmTrack.title).ifEmpty {
-                        listOf(Artist(id = "", name = "Unknown"))
-                    }
-                }
-            },
-            streamables = streamables,
-            extras = mergedExtras
-        )
     }
 
     private fun resolveBestAlbum(vararg albums: Album?): Album? {
@@ -167,7 +130,7 @@ class EchoEnhancedSongEndpoint(
             } else list
         }.distinctBy { it.id.ifEmpty { it.name } }
 
-        return dev.brahmkshatriya.echo.extension.utils.ArtistUtils.splitCombinedArtists(filtered)
+        return ArtistUtils.splitCombinedArtists(filtered)
     }
 
     private fun mergeWithLegacyPriority(
@@ -202,7 +165,7 @@ class EchoEnhancedSongEndpoint(
             streamables = createDefaultStreamables(trackId, enableVideo)
         )
     }
-    
+
     companion object {
         /**
          * Create streamable configuration with a single "YouTube" server entry for audio,
@@ -213,7 +176,7 @@ class EchoEnhancedSongEndpoint(
             videoId: String,
             enableVideo: Boolean = false
         ): List<Streamable> {
-             // Single "YouTube" server — all audio qualities are returned as Sources on resolve
+            // Single "YouTube" server — all audio qualities are returned as Sources on resolve
             val audioServer = Streamable.server(
                 id = "yt_audio_$videoId",
                 quality = 0,
@@ -231,7 +194,6 @@ class EchoEnhancedSongEndpoint(
                 quality = 0,
                 title = "YouTube Video",
                 extras = mapOf("videoId" to videoId, "type" to "video")
-
             )
 
             return listOf(audioServer, videoServer)

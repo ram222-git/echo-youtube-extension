@@ -10,6 +10,7 @@ import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.clients.QuickSearchClient
 import dev.brahmkshatriya.echo.common.clients.RadioClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
+import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Album
@@ -30,9 +31,12 @@ import kotlinx.coroutines.newSingleThreadContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.io.File
 import kotlin.system.measureTimeMillis
 
 private suspend fun <T : Any> PagedData<T>.loadFirst(): List<T> = loadPage(null).data
@@ -263,10 +267,10 @@ class ExtensionUnitTest {
         if (extension !is TrackClient) error("TrackClient is not implemented")
         if (extension !is LoginClient) error("LoginClient is not implemented")
 
-        val cookieFile = java.io.File("../cookise.txt").takeIf { it.exists() }
-            ?: java.io.File("cookise.txt").takeIf { it.exists() }
-            ?: java.io.File("../cookies.txt").takeIf { it.exists() }
-            ?: java.io.File("cookies.txt").takeIf { it.exists() }
+        val cookieFile = File("../cookise.txt").takeIf { it.exists() }
+            ?: File("cookise.txt").takeIf { it.exists() }
+            ?: File("../cookies.txt").takeIf { it.exists() }
+            ?: File("cookies.txt").takeIf { it.exists() }
         val cookieString = System.getenv("YOUTUBE_COOKIE")
             ?: cookieFile?.readText()?.trim()
         if (cookieString.isNullOrBlank()) {
@@ -292,8 +296,8 @@ class ExtensionUnitTest {
         val source = serverMedia.sources.first() as Streamable.Source.Http
         println("Testing HTTP connection to stream URL: ${source.request.url.take(100)}...")
 
-        val testClient = okhttp3.OkHttpClient()
-        val httpReqBuilder = okhttp3.Request.Builder()
+        val testClient = OkHttpClient()
+        val httpReqBuilder = Request.Builder()
             .url(source.request.url)
             .header("Range", "bytes=0-512")
         source.request.headers.forEach { (k, v) ->
@@ -326,7 +330,7 @@ class ExtensionUnitTest {
 
         val vHttp = videoSources.first() as Streamable.Source.Http
         println("  Playing video: ${vHttp.title} (quality=${vHttp.quality})")
-        val reqBuilder = okhttp3.Request.Builder()
+        val reqBuilder = Request.Builder()
             .url(vHttp.request.url)
             .header("Range", "bytes=0-512")
         vHttp.request.headers.forEach { (k, v) ->
@@ -348,34 +352,5 @@ class ExtensionUnitTest {
             println("  Requested ${testHeight}p -> Received ${customVideo.title} (quality=${customVideo.quality}, merged=${customMedia.merged})")
             assert(customVideo.quality == testHeight || customVideo.quality > 0)
         }
-    }
-
-    @Test
-    fun testCustomCookiesSetting() = testIn("Testing Custom Cookies via Settings") {
-        if (extension !is dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient) {
-            error("Extension does not implement SettingsChangeListenerClient")
-        }
-        val settingsClient = extension as dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
-
-        // Verify setting exists in getSettingItems
-        val settingItems = settingsClient.getSettingItems()
-        val cookieSetting = settingItems.firstOrNull { it.key == "custom_cookies" }
-        assert(cookieSetting != null) { "Expected 'custom_cookies' setting in getSettingItems()" }
-        println("Found setting: ${cookieSetting?.title} (${cookieSetting?.key})")
-
-        val cookieFile = java.io.File("../cookise.txt").takeIf { it.exists() }
-            ?: java.io.File("cookise.txt").takeIf { it.exists() }
-        val cookieString = cookieFile?.readText()?.trim() ?: return@testIn
-
-        // Test setting the cookie via Settings
-        mockedSettings.putString("custom_cookies", cookieString)
-        settingsClient.onSettingsChanged(mockedSettings, "custom_cookies")
-
-        val targetTrack = Track("hc0ZDaAZQT0", "")
-        val track = (extension as TrackClient).loadTrack(targetTrack, false)
-        val streamable = track.streamables.first()
-        val streamMedia = extension.loadStreamableMedia(streamable, false) as Streamable.Media.Server
-        assert(streamMedia.sources.isNotEmpty())
-        println("Custom Cookies Setting Test: Successfully resolved ${streamMedia.sources.size} sources without WebView login!")
     }
 }

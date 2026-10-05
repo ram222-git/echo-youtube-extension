@@ -33,52 +33,33 @@ import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeedData
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.pagedDataOfFirst
 import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
-import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.QuickSearchItem
 import dev.brahmkshatriya.echo.common.models.Radio
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
-import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toMedia
 import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.common.models.Track
-import dev.brahmkshatriya.echo.common.models.Track.Type
-import dev.brahmkshatriya.echo.common.models.Track.Playable
 import dev.brahmkshatriya.echo.common.models.TrackDetails
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.settings.Setting
-import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
-import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
-import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistEndpoint
-import dev.brahmkshatriya.echo.extension.endpoints.EchoArtistMoreEndpoint
-import dev.brahmkshatriya.echo.extension.endpoints.GoogleAccountResponse
-import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.brahmkshatriya.echo.extension.providers.ExtensionComponents
+import dev.brahmkshatriya.echo.extension.utils.CookieParser
+import dev.toastbits.ytmkt.endpoint.SearchType
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiAuthenticationState
 import dev.toastbits.ytmkt.model.external.PlaylistEditor
 import dev.toastbits.ytmkt.model.external.SongLikedStatus
-import io.ktor.client.request.request
-import io.ktor.client.statement.bodyAsText
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider.Quality.HIGH
-import dev.toastbits.ytmkt.model.external.ThumbnailProvider.Quality.LOW
 import dev.toastbits.ytmkt.model.external.mediaitem.YtmArtist
-import dev.toastbits.ytmkt.model.external.mediaitem.YtmPlaylist
-import dev.toastbits.ytmkt.model.external.mediaitem.YtmSong
-import dev.toastbits.ytmkt.model.external.YoutubeVideoFormat
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.plugins.ClientRequestException
-import io.ktor.client.request.headers
 import io.ktor.client.request.request
 import io.ktor.http.headers
 import kotlinx.coroutines.coroutineScope
-import kotlinx.serialization.encodeToString
-import java.security.MessageDigest
-import dev.toastbits.ytmkt.endpoint.SearchResults
-import dev.toastbits.ytmkt.endpoint.SearchType
 
 private fun createShelfPagedDataFromMediaItems(mediaItems: PagedData<EchoMediaItem>): PagedData<Shelf> {
     return PagedData.Continuous { continuation ->
@@ -110,12 +91,6 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "send_back_to_google",
             "Upload listening history to YouTube Music to improve recommendations and stats (works when logged in).",
             true
-        ),
-        SettingTextInput(
-            "Custom YouTube Cookies",
-            "custom_cookies",
-            "Paste raw YouTube cookies (e.g. SAPISID=...; SID=...) to enable restricted playback and test without WebView login.",
-            ""
         )
     )
 
@@ -123,31 +98,20 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     override fun setSettings(settings: Settings) {
         this.settings = settings
         components = ExtensionComponents(api, settings, json)
-        applyCustomCookies()
     }
 
     override suspend fun onSettingsChanged(settings: Settings, key: String?) {
         this.settings = settings
-        if (key == null || key == "custom_cookies") {
-            applyCustomCookies()
-        }
     }
 
-    private fun applyCustomCookies() {
-        val raw = settings.getString("custom_cookies")?.trim()
-            ?.removeSurrounding("\"")
-            ?.removeSurrounding("'")
-            ?.trim()
-        if (!raw.isNullOrBlank()) {
-            println("YoutubeExtension: Applying custom cookies from settings (length: ${raw.length})")
-            components.authManager.updateCookies(raw)
-            RealNewPipeVideoFormatsEndpoint.globalCookie = raw
-            components.authManager.onCookieUpdate = { updatedCookie ->
-                RealNewPipeVideoFormatsEndpoint.globalCookie = updatedCookie
-            }
-            RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = { setCookieHeaders ->
-                components.authManager.handleSetCookieHeaders(setCookieHeaders)
-            }
+    private fun syncActiveCookie(cookie: String) {
+        components.authManager.updateCookies(cookie)
+        RealNewPipeVideoFormatsEndpoint.globalCookie = cookie
+        components.authManager.onCookieUpdate = { updatedCookie ->
+            RealNewPipeVideoFormatsEndpoint.globalCookie = updatedCookie
+        }
+        RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = { setCookieHeaders ->
+            components.authManager.handleSetCookieHeaders(setCookieHeaders)
         }
     }
 
@@ -558,14 +522,41 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                 ?: throw Exception("Login Failed SAPISID cookie not found or empty. Please try logging in again.")
             
             val auth = CookieParser.generateDynamicAuthHeader(cookieMap)
-            val headersMap = mutableMapOf("cookie" to cookie, "authorization" to auth)
-            val headers = headers { headersMap.forEach { (t, u) -> append(t, u) } }
-            return api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
-                headers {
-                    append("referer", "https://music.youtube.com/")
-                    appendAll(headers)
-                }
-            }.getUsers(cookie, auth)
+            val authHeaders = headers {
+                append("cookie", cookie)
+                append("authorization", auth)
+            }
+            api.user_auth_state = YoutubeiAuthenticationState(api, authHeaders, null)
+
+            // 1. Try InnerTube account/account_menu via components.accountEndpoint
+            val menuUsers = runCatching {
+                components.accountEndpoint.getAccountMenu().getUsers(cookie, auth)
+            }.getOrNull()
+
+            if (!menuUsers.isNullOrEmpty() && menuUsers.any { it.name != "YouTube Music User" }) {
+                return menuUsers
+            }
+
+            // 2. Try getAccountSwitcherEndpoint
+            val switcherUsers = runCatching {
+                api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
+                    headers {
+                        append("cookie", cookie)
+                        append("authorization", auth)
+                        append("origin", "https://music.youtube.com")
+                        append("referer", "https://music.youtube.com/")
+                        append("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                        append("accept", "*/*")
+                        append("x-origin", "https://music.youtube.com")
+                    }
+                }.getUsers(cookie, auth)
+            }.getOrNull()
+
+            if (!switcherUsers.isNullOrEmpty() && switcherUsers.any { it.name != "YouTube Music User" }) {
+                return switcherUsers
+            }
+
+            return menuUsers ?: switcherUsers ?: createFallbackUsers(cookie, auth)
         }
     }
 
@@ -577,15 +568,31 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             api.user_auth_state = null
         } else {
             val cookie = user.extras["cookie"] ?: throw Exception("No cookie")
-            components.authManager.updateCookies(cookie)
-            RealNewPipeVideoFormatsEndpoint.globalCookie = cookie
+            val auth = user.extras["auth"] ?: CookieParser.generateDynamicAuthHeader(CookieParser.parse(cookie))
+            val signInUrl = user.extras["signInUrl"]
+            var activeCookie = cookie
 
-            components.authManager.onCookieUpdate = { updatedCookie ->
-                RealNewPipeVideoFormatsEndpoint.globalCookie = updatedCookie
+            if (!signInUrl.isNullOrEmpty()) {
+                runCatching {
+                    kotlinx.coroutines.runBlocking {
+                        val response = api.client.request("https://music.youtube.com/$signInUrl") {
+                            headers {
+                                append("cookie", cookie)
+                                append("authorization", auth)
+                                append("origin", "https://music.youtube.com")
+                                append("referer", "https://music.youtube.com/")
+                                append("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            }
+                        }
+                        val setCookies: List<String> = response.headers.getAll("set-cookie") ?: emptyList()
+                        if (setCookies.isNotEmpty()) {
+                            activeCookie = CookieParser.mergeCookies(cookie, setCookies)
+                        }
+                    }
+                }
             }
-            RealNewPipeVideoFormatsEndpoint.cookieUpdateListener = { setCookieHeaders ->
-                components.authManager.handleSetCookieHeaders(setCookieHeaders)
-            }
+
+            syncActiveCookie(activeCookie)
         }
         runCatching { components.likeManager.clearCache() }
         api.visitor_id = runCatching { kotlinx.coroutines.runBlocking { components.visitorEndpoint.getVisitorId() } }.getOrNull()
@@ -593,41 +600,41 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun getCurrentUser(): User? {
         val user = components.authManager.getCurrentUser().getOrNull()
-        if (user != null) return user
+        if (user != null && user.name != "YouTube Music User") {
+            return if (user.subtitle == "Logged in") user.copy(subtitle = "YouTube Music") else user
+        }
 
-        val headers = api.user_auth_state?.headers ?: return null
+        val headers = api.user_auth_state?.headers ?: return user
         return runCatching {
+            val cookie = components.authManager.getActiveCookie() ?: ""
+            val auth = CookieParser.generateDynamicAuthHeader(CookieParser.parse(cookie))
+
+            // Try account menu
+            val menuUser = runCatching {
+                components.accountEndpoint.getAccountMenu().getUsers(cookie, auth).firstOrNull()
+            }.getOrNull()
+            if (menuUser != null && menuUser.name != "YouTube Music User") {
+                return@runCatching menuUser
+            }
+
+            // Try getAccountSwitcherEndpoint
             val response = api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
                 headers {
+                    append("origin", "https://music.youtube.com")
                     append("referer", "https://music.youtube.com/")
+                    append("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    append("accept", "*/*")
+                    append("x-origin", "https://music.youtube.com")
                     appendAll(headers)
                 }
             }
-            
-            val responseText = response.bodyAsText()
-            val jsonText = if (responseText.startsWith(")]}'")) {
-                responseText.substringAfter(")]}'")
-            } else {
-                responseText
+            val switcherUser = response.getUsers(cookie, auth).firstOrNull()
+            if (switcherUser != null && switcherUser.name != "YouTube Music User") {
+                return@runCatching switcherUser
             }
-            
-            val accountResponse = json.decodeFromString<dev.brahmkshatriya.echo.extension.endpoints.GoogleAccountResponse>(jsonText)
-            val currentCookie = components.authManager.getActiveCookie() ?: ""
-            val userResponse = accountResponse.getUsers(currentCookie, "").firstOrNull() ?: return@runCatching null
-            
-            userResponse.copy(
-                subtitle = userResponse.extras["email"] ?: "YouTube Music User",
-                extras = userResponse.extras.toMutableMap().apply {
-                    put("isLoggedIn", "true")
-                    put("userService", "youtube_music")
-                    put("accountType", "google")
-                    if (currentCookie.isNotEmpty()) {
-                        put("cookie", currentCookie)
-                    }
-                    put("lastUpdated", System.currentTimeMillis().toString())
-                }
-            )
-        }.getOrNull()
+
+            user
+        }.getOrNull() ?: user
     }
 
 

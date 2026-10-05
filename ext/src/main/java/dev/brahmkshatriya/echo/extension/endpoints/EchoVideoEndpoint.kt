@@ -1,22 +1,23 @@
 package dev.brahmkshatriya.echo.extension.endpoints
 
+import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
+import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
 import io.ktor.client.call.body
 import io.ktor.client.request.request
-import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
-import io.ktor.http.ContentType
-import io.ktor.http.HttpMethod
-import io.ktor.http.contentType
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
@@ -69,13 +70,13 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         })
     }
 
-    private val okHttpClient by lazy { okhttp3.OkHttpClient() }
+    private val okHttpClient by lazy { OkHttpClient() }
 
     suspend fun getRestrictedVideo(id: String, cookie: String? = null): YoutubeFormatResponse? {
-        val userCookie = cookie ?: dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
+        val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
         println("EchoVideoEndpoint: getRestrictedVideo for $id. Cookie present: ${!userCookie.isNullOrBlank()}, length: ${userCookie?.length ?: 0}")
         if (!userCookie.isNullOrBlank()) {
-            val cookieMap = dev.brahmkshatriya.echo.extension.utils.CookieParser.parse(userCookie)
+            val cookieMap = CookieParser.parse(userCookie)
             println("EchoVideoEndpoint: Cookie keys (${cookieMap.size}): ${cookieMap.keys}")
         } else {
             println("EchoVideoEndpoint: WARNING - No cookie found in globalCookie or user_auth_state! Age-restricted videos require login cookies.")
@@ -91,7 +92,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         return tryTvClient(id, userCookie)
     }
 
-    private suspend fun tryWebRemix(id: String, cookie: String?): YoutubeFormatResponse? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    private suspend fun tryWebRemix(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
             val payload = buildJsonObject {
                 put("videoId", id)
@@ -113,14 +114,14 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 })
             }
 
-            val cookieMap = if (!cookie.isNullOrBlank()) dev.brahmkshatriya.echo.extension.utils.CookieParser.parse(cookie) else emptyMap()
+            val cookieMap = if (!cookie.isNullOrBlank()) CookieParser.parse(cookie) else emptyMap()
             val authHeader = if (cookieMap.isNotEmpty()) {
-                dev.brahmkshatriya.echo.extension.utils.CookieParser.generateDynamicAuthHeader(cookieMap, "https://music.youtube.com")
+                CookieParser.generateDynamicAuthHeader(cookieMap, "https://music.youtube.com")
             } else ""
 
             println("tryWebRemix: Sending request for $id. Cookie length: ${cookie?.length ?: 0}, AuthHeader present: ${authHeader.isNotBlank()}")
 
-            val requestBuilder = okhttp3.Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url("https://music.youtube.com/youtubei/v1/player")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
                 .header("Content-Type", "application/json")
@@ -141,12 +142,12 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
             requestBuilder.post(requestBody)
 
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            val bodyString = response.body?.string().orEmpty()
+            val (bodyString, setCookies) = okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty() to response.headers("Set-Cookie")
+            }
 
-            val setCookies = response.headers("Set-Cookie")
             if (setCookies.isNotEmpty()) {
-                dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
+                RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
             }
 
             val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
@@ -159,7 +160,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         }.getOrNull()
     }
 
-    private suspend fun tryWebCreator(id: String, cookie: String?): YoutubeFormatResponse? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    private suspend fun tryWebCreator(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
             val payload = buildJsonObject {
                 put("videoId", id)
@@ -181,12 +182,12 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 })
             }
 
-            val cookieMap = if (!cookie.isNullOrBlank()) dev.brahmkshatriya.echo.extension.utils.CookieParser.parse(cookie) else emptyMap()
+            val cookieMap = if (!cookie.isNullOrBlank()) CookieParser.parse(cookie) else emptyMap()
             val authHeader = if (cookieMap.isNotEmpty()) {
-                dev.brahmkshatriya.echo.extension.utils.CookieParser.generateDynamicAuthHeader(cookieMap, "https://www.youtube.com")
+                CookieParser.generateDynamicAuthHeader(cookieMap, "https://www.youtube.com")
             } else ""
 
-            val requestBuilder = okhttp3.Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url("https://www.youtube.com/youtubei/v1/player")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
                 .header("Content-Type", "application/json")
@@ -207,12 +208,12 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
             requestBuilder.post(requestBody)
 
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            val bodyString = response.body?.string().orEmpty()
+            val (bodyString, setCookies) = okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty() to response.headers("Set-Cookie")
+            }
 
-            val setCookies = response.headers("Set-Cookie")
             if (setCookies.isNotEmpty()) {
-                dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
+                RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
             }
 
             val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
@@ -225,7 +226,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         }.getOrNull()
     }
 
-    private suspend fun tryTvClient(id: String, cookie: String?): YoutubeFormatResponse? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    private suspend fun tryTvClient(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
             val payload = buildJsonObject {
                 put("videoId", id)
@@ -242,7 +243,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 })
             }
 
-            val requestBuilder = okhttp3.Request.Builder()
+            val requestBuilder = Request.Builder()
                 .url("https://www.youtube.com/youtubei/v1/player")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
                 .header("Content-Type", "application/json")
@@ -258,8 +259,9 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
             requestBuilder.post(requestBody)
 
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            val bodyString = response.body?.string().orEmpty()
+            val bodyString = okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty()
+            }
             val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
             println("tryTvClient resp: status=${resp.playabilityStatus?.status}, reason=${resp.playabilityStatus?.reason}, formats=${resp.streamingData?.formats?.size}, adaptive=${resp.streamingData?.adaptiveFormats?.size}")
             val formats = resp.streamingData?.formats.orEmpty() + resp.streamingData?.adaptiveFormats.orEmpty()

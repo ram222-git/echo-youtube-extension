@@ -3,7 +3,6 @@ package dev.brahmkshatriya.echo.extension
 import dev.toastbits.ytmkt.model.external.YoutubeVideoFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
@@ -19,7 +18,6 @@ import org.schabi.newpipe.extractor.exceptions.ParsingException
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import java.util.concurrent.TimeUnit
-
 
 class RealNewPipeVideoFormatsEndpoint {
 
@@ -62,7 +60,8 @@ class RealNewPipeVideoFormatsEndpoint {
                         }
 
                         val cookie = globalCookie
-                        if (isYouTube && !cookie.isNullOrBlank() && !request.headers().containsKey("Cookie") && !request.headers().containsKey("cookie")) {
+                        val hasCookie = request.headers().keys.any { it.equals("cookie", ignoreCase = true) }
+                        if (isYouTube && !cookie.isNullOrBlank() && !hasCookie) {
                             builder.addHeader("Cookie", cookie)
                         }
 
@@ -70,20 +69,20 @@ class RealNewPipeVideoFormatsEndpoint {
                             builder.post(data.toRequestBody(null))
                         }
 
-                        val response = httpClient.newCall(builder.build()).execute()
-                        val setCookies = response.headers("Set-Cookie")
-                        if (setCookies.isNotEmpty()) {
-                            cookieUpdateListener?.invoke(setCookies)
-                        }
+                        return httpClient.newCall(builder.build()).execute().use { response ->
+                            val setCookies = response.headers("Set-Cookie")
+                            if (setCookies.isNotEmpty()) {
+                                cookieUpdateListener?.invoke(setCookies)
+                            }
 
-                        val body = response.body?.string()
-                        return Response(
-                            response.code,
-                            response.message,
-                            response.headers.toMultimap(),
-                            body,
-                            response.request.url.toString()
-                        )
+                            Response(
+                                response.code,
+                                response.message,
+                                response.headers.toMultimap(),
+                                response.body?.string(),
+                                response.request.url.toString()
+                            )
+                        }
                     }
                 })
 
@@ -262,4 +261,3 @@ class RealNewPipeVideoFormatsEndpoint {
         httpClient.cache?.close()
     }
 }
-

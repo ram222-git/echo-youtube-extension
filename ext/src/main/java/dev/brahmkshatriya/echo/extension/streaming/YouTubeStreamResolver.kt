@@ -4,31 +4,28 @@ import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
+import dev.brahmkshatriya.echo.extension.YtmKtVideoFormatsEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoVideoEndpoint
+import dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
-import dev.toastbits.ytmkt.model.external.YoutubeVideoFormat
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import kotlin.math.abs
 
 class YouTubeStreamResolver(
     private val api: YoutubeiApi,
-    private val settings: Settings,
-    private val videoEndpoint: dev.brahmkshatriya.echo.extension.endpoints.EchoVideoEndpoint,
-    private val visitorEndpoint: dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
+    @Suppress("unused") private val settings: Settings,
+    private val videoEndpoint: EchoVideoEndpoint,
+    private val visitorEndpoint: EchoVisitorEndpoint
 ) {
-    private fun getRealNewPipe() = RealNewPipeVideoFormatsEndpoint()
-    
-    private val ytmKtEndpoint by lazy {
-        dev.brahmkshatriya.echo.extension.YtmKtVideoFormatsEndpoint(api)
+    companion object {
+        private val HEIGHT_REGEX = Regex("(\\d+)p")
     }
 
-    private val hlsHttpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .build()
+    private fun getRealNewPipe() = RealNewPipeVideoFormatsEndpoint()
+
+    private val ytmKtEndpoint by lazy {
+        YtmKtVideoFormatsEndpoint(api)
     }
 
     private fun createHlsSource(masterUrl: String, isMusicOrigin: Boolean = true): Streamable.Source.Http {
@@ -92,7 +89,7 @@ class YouTubeStreamResolver(
         val realNewPipeUrl = runCatching {
             val muxedStreams = getRealNewPipe().getMuxedVideoStreams(videoId).getOrNull() ?: emptyList()
             val muxedMatch = muxedStreams.firstOrNull { format ->
-                val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 h == targetHeight
             }
             if (muxedMatch?.url != null) {
@@ -100,8 +97,8 @@ class YouTubeStreamResolver(
             } else {
                 val separate = getRealNewPipe().getSeparateStreams(videoId, null).getOrNull()
                 val videoMatch = separate?.first?.minByOrNull { format ->
-                    val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    Math.abs(h - targetHeight)
+                    val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    abs(h - targetHeight)
                 } ?: separate?.first?.firstOrNull()
                 videoMatch?.url ?: muxedStreams.firstOrNull()?.url
             }
@@ -111,7 +108,7 @@ class YouTubeStreamResolver(
         val backgroundUrl = realNewPipeUrl ?: runCatching {
             val muxedStreams = ytmKtEndpoint.getMuxedVideoStreams(videoId).getOrNull() ?: emptyList()
             val muxedMatch = muxedStreams.firstOrNull { format ->
-                val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 h == targetHeight
             }
             if (muxedMatch?.url != null) {
@@ -119,8 +116,8 @@ class YouTubeStreamResolver(
             } else {
                 val separate = ytmKtEndpoint.getSeparateStreams(videoId, null).getOrNull()
                 val videoMatch = separate?.first?.minByOrNull { format ->
-                    val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                    Math.abs(h - targetHeight)
+                    val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                    abs(h - targetHeight)
                 } ?: separate?.first?.firstOrNull()
                 videoMatch?.url ?: muxedStreams.firstOrNull()?.url
             }
@@ -239,7 +236,7 @@ class YouTubeStreamResolver(
     private sealed class ExtractionResult {
         data class Success(val media: Streamable.Media) : ExtractionResult()
         data class Error(val reason: String) : ExtractionResult()
-        object Failed : ExtractionResult()
+        data object Failed : ExtractionResult()
     }
 
     private suspend fun tryRealNewPipeExtractor(
@@ -266,13 +263,13 @@ class YouTubeStreamResolver(
                     // 2. Fallback: Progressive video + audio merged
                     val reqHeight = targetHeight ?: 720
                     val selectedVideo = streams.videoOnly.minByOrNull { format ->
-                        val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        Math.abs(h - reqHeight)
+                        val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                        abs(h - reqHeight)
                     } ?: streams.videoOnly.firstOrNull() ?: streams.muxed.firstOrNull()
                     val bestAudio = streams.audio.firstOrNull()
 
                     if (selectedVideo?.url != null && bestAudio?.url != null) {
-                        val actualHeight = Regex("(\\d+)p").find(selectedVideo.mimeType)
+                        val actualHeight = HEIGHT_REGEX.find(selectedVideo.mimeType)
                             ?.groupValues?.get(1)?.toIntOrNull() ?: reqHeight
                         val videoSource = Streamable.Source.Http(
                             request = createStreamingRequest(selectedVideo.url!!),
@@ -338,13 +335,13 @@ class YouTubeStreamResolver(
                 if (separateResult.isSuccess) {
                     val (videoFormats, audioFormats) = separateResult.getOrThrow()
                     val selectedVideo = videoFormats.minByOrNull { format ->
-                        val h = Regex("(\\d+)p").find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                        Math.abs(h - reqHeight)
+                        val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                        abs(h - reqHeight)
                     } ?: videoFormats.firstOrNull()
                     val bestAudio = audioFormats.firstOrNull()
 
                     if (selectedVideo?.url != null && bestAudio?.url != null) {
-                        val actualHeight = Regex("(\\d+)p").find(selectedVideo.mimeType)
+                        val actualHeight = HEIGHT_REGEX.find(selectedVideo.mimeType)
                             ?.groupValues?.get(1)?.toIntOrNull() ?: reqHeight
                         val videoSource = Streamable.Source.Http(
                             request = createStreamingRequest(selectedVideo.url!!),
@@ -431,7 +428,7 @@ class YouTubeStreamResolver(
                 }
                 val reqHeight = targetHeight ?: 720
                 val selectedVideo = videoFormats.minByOrNull {
-                    Math.abs((it.height?.toInt() ?: 0) - reqHeight)
+                    abs((it.height?.toInt() ?: 0) - reqHeight)
                 } ?: videoFormats.firstOrNull()
                 val bestAudio = audioFormats.maxByOrNull { it.bitrate } ?: audioFormats.firstOrNull()
 
@@ -581,7 +578,7 @@ class YouTubeStreamResolver(
                 if (distinctVideoFormats.isNotEmpty() && bestAudio != null) {
                     val reqHeight = targetHeight ?: 720
                     val selectedVideo = distinctVideoFormats.minByOrNull {
-                        Math.abs(it.height!!.toInt() - reqHeight)
+                        abs(it.height!!.toInt() - reqHeight)
                     } ?: distinctVideoFormats.first()
 
                     val h = selectedVideo.height!!.toInt()
@@ -693,7 +690,7 @@ class YouTubeStreamResolver(
         return runCatching {
             val params = cipherString.split('&').associate {
                 val parts = it.split('=', limit = 2)
-                parts[0] to (if (parts.size > 1) java.net.URLDecoder.decode(parts[1], "UTF-8") else "")
+                parts[0] to (if (parts.size > 1) URLDecoder.decode(parts[1], StandardCharsets.UTF_8.name()) else "")
             }
             val rawUrl = params["url"] ?: return@runCatching null
             val s = params["s"]

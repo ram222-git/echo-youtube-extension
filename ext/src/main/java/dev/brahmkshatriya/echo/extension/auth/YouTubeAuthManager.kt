@@ -2,20 +2,20 @@ package dev.brahmkshatriya.echo.extension.auth
 
 import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.extension.createFallbackUsers
+import dev.brahmkshatriya.echo.extension.endpoints.EchoAccountEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
-import dev.brahmkshatriya.echo.extension.endpoints.GoogleAccountResponse
-import dev.brahmkshatriya.echo.extension.json
+import dev.brahmkshatriya.echo.extension.getUsers
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiAuthenticationState
-import io.ktor.client.request.headers
 import io.ktor.client.request.request
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.headers
 
 class YouTubeAuthManager(
     private val api: YoutubeiApi,
-    private val visitorEndpoint: EchoVisitorEndpoint
+    private val visitorEndpoint: EchoVisitorEndpoint,
+    private val accountEndpoint: EchoAccountEndpoint? = null
 ) {
     @Volatile
     private var activeCookie: String? = null
@@ -23,9 +23,13 @@ class YouTubeAuthManager(
     @Volatile
     private var currentUserId: String? = null
 
+    @Volatile
     private var authState: YoutubeiAuthenticationState? = null
+
+    @Volatile
     private var pendingCredentials: PendingCredentials? = null
     
+    @Volatile
     var onCookieUpdate: ((String) -> Unit)? = null
 
     private data class PendingCredentials(
@@ -125,7 +129,7 @@ class YouTubeAuthManager(
 
         ensureVisitorId().getOrNull()
 
-        getCurrentUser().getOrThrow() ?: throw Exception("Failed to retrieve user information after login")
+        getCurrentUser().getOrNull() ?: createFallbackUsers(cookie, dynamicAuth).first()
     }
 
     fun logout() {
@@ -137,40 +141,64 @@ class YouTubeAuthManager(
         println("Logged out and cleared credentials")
     }
 
-    suspend fun getCurrentUser(): Result<User?> = runCatching {
-        val state = authState ?: api.user_auth_state ?: return@runCatching null
-
-        val response = api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
-            headers {
-                append("referer", "https://music.youtube.com/")
-                state.headers.forEach { key, values ->
-                    values.forEach { value -> append(key, value) }
-                }
-            }
-        }
-        
-        val responseText = response.bodyAsText()
-        val jsonText = if (responseText.startsWith(")]}'")) {
-            responseText.substringAfter(")]}'")
-        } else {
-            responseText
-        }
-        
-        val accountResponse = json.decodeFromString<GoogleAccountResponse>(jsonText)
-        val userResponse = accountResponse.getUsers(activeCookie ?: "", "").firstOrNull()
-
-        userResponse?.copy(
-            subtitle = userResponse.extras["email"]?.takeIf { it.isNotEmpty() }
-                ?: userResponse.extras["channelHandle"]?.takeIf { it.isNotEmpty() }
-                ?: "YouTube Music User",
-            extras = userResponse.extras.toMutableMap().apply {
+    private fun User.withUserExtras(cookie: String): User {
+        return copy(
+            subtitle = "YouTube Music",
+            extras = extras.toMutableMap().apply {
                 put("isLoggedIn", "true")
                 put("userService", "youtube_music")
                 put("accountType", "google")
-                activeCookie?.let { put("cookie", it) }
+                if (cookie.isNotEmpty()) put("cookie", cookie)
                 put("lastUpdated", System.currentTimeMillis().toString())
             }
         )
+    }
+
+    suspend fun getCurrentUser(): Result<User?> = runCatching {
+        val state = authState ?: api.user_auth_state ?: return@runCatching null
+        val currentCookie = activeCookie ?: ""
+        val cookieMap = CookieParser.parse(currentCookie)
+        val dynamicAuth = CookieParser.generateDynamicAuthHeader(cookieMap)
+
+        // 1. Try InnerTube account/account_menu via accountEndpoint
+        val accountMenuUsers: List<User>? = runCatching {
+            val response = accountEndpoint?.getAccountMenu()
+            response?.getUsers(currentCookie, dynamicAuth)
+        }.getOrNull()
+
+        val foundFromMenu = accountMenuUsers?.firstOrNull { it.name != "YouTube Music User" }
+            ?: accountMenuUsers?.firstOrNull()
+
+        if (foundFromMenu != null && foundFromMenu.name != "YouTube Music User") {
+            return@runCatching foundFromMenu.withUserExtras(currentCookie)
+        }
+
+        // 2. Try getAccountSwitcherEndpoint
+        val switcherUsers: List<User>? = runCatching {
+            val response = api.client.request("https://music.youtube.com/getAccountSwitcherEndpoint") {
+                headers {
+                    append("origin", "https://music.youtube.com")
+                    append("referer", "https://music.youtube.com/")
+                    append("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                    append("accept", "*/*")
+                    append("x-origin", "https://music.youtube.com")
+                    state.headers.forEach { key, values ->
+                        values.forEach { value -> append(key, value) }
+                    }
+                }
+            }
+            response.getUsers(currentCookie, dynamicAuth)
+        }.getOrNull()
+
+        val foundFromSwitcher = switcherUsers?.firstOrNull { it.name != "YouTube Music User" }
+            ?: switcherUsers?.firstOrNull()
+
+        if (foundFromSwitcher != null && foundFromSwitcher.name != "YouTube Music User") {
+            return@runCatching foundFromSwitcher.withUserExtras(currentCookie)
+        }
+
+        val fallback = foundFromMenu ?: foundFromSwitcher ?: createFallbackUsers(currentCookie, dynamicAuth).firstOrNull()
+        fallback?.copy(subtitle = "YouTube Music")
     }
 
     suspend fun requireAuth(): YoutubeiAuthenticationState {
