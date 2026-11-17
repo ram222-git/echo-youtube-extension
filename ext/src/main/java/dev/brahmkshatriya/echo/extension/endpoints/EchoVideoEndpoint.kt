@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.extension.endpoints
 
 import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
+import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
@@ -71,6 +72,77 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
     }
 
     private val okHttpClient by lazy { OkHttpClient() }
+
+    suspend fun getSpoofedVideo(
+        id: String,
+        client: SpoofClient,
+        cookie: String? = null
+    ): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
+        runCatching {
+            val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
+            val payload = buildJsonObject {
+                put("videoId", id)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("playbackContext", buildJsonObject {
+                    put("contentPlaybackContext", buildJsonObject {
+                        put("html5Preference", "HTML5_PREF_WANTS")
+                        put("signatureTimestamp", 20723)
+                    })
+                })
+                put("context", client.buildClientContext(api.visitor_id))
+            }
+
+            val isMusic = client == SpoofClient.WEB_REMIX
+            val playerUrl = if (isMusic) "https://music.youtube.com/youtubei/v1/player" else "https://www.youtube.com/youtubei/v1/player"
+            val cookieMap = if (!userCookie.isNullOrBlank()) CookieParser.parse(userCookie) else emptyMap()
+            val authHeader = if (cookieMap.isNotEmpty() && client.isWebClient) {
+                CookieParser.generateDynamicAuthHeader(cookieMap, client.origin)
+            } else ""
+
+            val requestBuilder = Request.Builder()
+                .url(playerUrl)
+                .header("User-Agent", client.userAgent)
+                .header("Content-Type", "application/json")
+                .header("X-YouTube-Client-Name", client.clientNumber)
+                .header("X-YouTube-Client-Version", client.clientVersion)
+
+            if (client.isWebClient) {
+                requestBuilder.header("Origin", client.origin)
+                requestBuilder.header("X-Origin", client.origin)
+            }
+
+            if (!userCookie.isNullOrBlank()) {
+                requestBuilder.header("Cookie", userCookie)
+            }
+            if (authHeader.isNotEmpty()) {
+                requestBuilder.header("Authorization", authHeader)
+            }
+
+            val requestBody = payload.toString().toRequestBody("application/json".toMediaType())
+            requestBuilder.post(requestBody)
+
+            val (bodyString, setCookies) = okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty() to response.headers("Set-Cookie")
+            }
+
+            if (setCookies.isNotEmpty()) {
+                RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
+            }
+
+            val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
+            val formats = resp.streamingData?.formats.orEmpty() + resp.streamingData?.adaptiveFormats.orEmpty()
+            if (formats.isNotEmpty() || !resp.streamingData?.hlsManifestUrl.isNullOrEmpty()) {
+                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) succeeded for $id. Formats: ${formats.size}, HLS: ${resp.streamingData?.hlsManifestUrl != null}")
+                resp
+            } else {
+                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) returned no playable formats for $id. Status: ${resp.playabilityStatus?.status}, Reason: ${resp.playabilityStatus?.reason}")
+                null
+            }
+        }.onFailure {
+            println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) failed for $id: ${it.javaClass.simpleName} - ${it.message}")
+        }.getOrNull()
+    }
 
     suspend fun getRestrictedVideo(id: String, cookie: String? = null): YoutubeFormatResponse? {
         val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")

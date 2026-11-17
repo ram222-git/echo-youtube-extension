@@ -44,6 +44,7 @@ import dev.brahmkshatriya.echo.common.models.TrackDetails
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.settings.Setting
+import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.providers.ExtensionComponents
@@ -91,6 +92,28 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "send_back_to_google",
             "Upload listening history to YouTube Music to improve recommendations and stats (works when logged in).",
             true
+        ),
+        SettingList(
+            title = "Spoof Video Streams Client",
+            key = "spoof_stream_client",
+            summary = "Select client profile to spoof for playback streams .",
+            entryTitles = listOf(
+                "Auto (Smart Cascade - Recommended)",
+                "Android VR (Bypasses bot checks & buffering)",
+                "iOS (High quality audio & HLS)",
+                "Android TV / Smart TV",
+                "Mobile Web (MWEB)",
+                "YouTube Music Web (WEB_REMIX)"
+            ),
+            entryValues = listOf(
+                "auto",
+                "android_vr",
+                "ios",
+                "tv",
+                "mweb",
+                "web_remix"
+            ),
+            defaultEntryIndex = 0
         )
     )
 

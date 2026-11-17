@@ -53,6 +53,7 @@ Inside Echo's Extension Settings for YouTube Music:
 | **High Thumbnail Quality** | Uses higher-resolution album artwork (uses slightly more data). | `Enabled` |
 | **Enable Video** | Displays video streams and background options in quality selection. | `Disabled` |
 | **Send Listening Data to Google** | Uploads listening history to YouTube Music to update your recommendations, stats, and Year-in-Review. | `Enabled` |
+| **Spoof Video Streams Client** | Spoofs YouTube Innertube client parameters (Auto, Android VR, iOS, TV, MWEB, Web Remix) . | `Auto` |
 
 ---
 
