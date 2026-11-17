@@ -76,10 +76,94 @@ class YouTubeStreamResolver(
         return Streamable.Source.Http(
             request = createStreamingRequest(masterUrl, isMusicOrigin),
             type = Streamable.SourceType.HLS,
-            quality = 1080,
+            quality = 2160,
             title = "Auto",
             isVideo = true
         )
+    }
+
+    private fun getSortedHlsUrl(videoId: String, hlsUrl: String): String {
+        return runCatching {
+            // Clean up stale temp files older than 1 hour
+            runCatching {
+                val tempDir = java.io.File(System.getProperty("java.io.tmpdir") ?: "")
+                if (tempDir.isDirectory) {
+                    val oneHourAgo = System.currentTimeMillis() - 3600_000L
+                    tempDir.listFiles { f ->
+                        f.name.startsWith("hls_") && f.name.endsWith(".m3u8") && f.lastModified() < oneHourAgo
+                    }?.forEach { it.delete() }
+                }
+            }
+
+            // Fetch YouTube's master playlist
+            val req = okhttp3.Request.Builder()
+                .url(hlsUrl)
+                .header("User-Agent", getUserAgentForUrl(hlsUrl))
+                .header("Accept", "*/*")
+                .build()
+
+            val rawM3u8 = probeClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching hlsUrl
+                resp.body?.string().orEmpty()
+            }
+
+            if (rawM3u8.isBlank() || !rawM3u8.contains("#EXT-X-STREAM-INF")) {
+                return@runCatching hlsUrl
+            }
+
+            val sortedM3u8 = sortHlsMasterPlaylist(rawM3u8)
+            val tempFile = java.io.File.createTempFile("hls_${videoId}_", ".m3u8")
+            tempFile.deleteOnExit()
+            tempFile.writeText(sortedM3u8)
+            val fileUri = if (tempFile.absolutePath.startsWith("/")) {
+                "file://${tempFile.absolutePath}"
+            } else {
+                tempFile.toURI().toString()
+            }
+            println("YouTubeStreamResolver: Re-ordered HLS master playlist (highest quality first) -> $fileUri")
+            fileUri
+        }.getOrElse {
+            println("YouTubeStreamResolver: Failed to sort HLS playlist, using direct URL: ${it.message}")
+            hlsUrl
+        }
+    }
+
+    private fun sortHlsMasterPlaylist(m3u8Content: String): String {
+        val lines = m3u8Content.lines()
+        val headerLines = mutableListOf<String>()
+        val variantPairs = mutableListOf<Pair<String, String>>()
+
+        var currentStreamInf: String? = null
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) continue
+            if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
+                currentStreamInf = trimmed
+            } else if (currentStreamInf != null) {
+                variantPairs.add(currentStreamInf to trimmed)
+                currentStreamInf = null
+            } else {
+                headerLines.add(trimmed)
+            }
+        }
+
+        // Sort variant pairs descending by height (2160p -> 1440p -> 1080p -> 720p -> ...), then bandwidth
+        val sortedVariants = variantPairs.sortedByDescending { (inf, _) ->
+            val bandwidth = Regex("BANDWIDTH=(\\d+)").find(inf)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val res = Regex("RESOLUTION=(\\d+)x(\\d+)").find(inf)
+            val h = res?.groupValues?.get(2)?.toLongOrNull() ?: 0L
+            h * 100_000_000L + bandwidth
+        }
+
+        val out = StringBuilder()
+        for (h in headerLines) {
+            out.appendLine(h)
+        }
+        for ((inf, url) in sortedVariants) {
+            out.appendLine(inf)
+            out.appendLine(url)
+        }
+        return out.toString()
     }
 
     private fun createStreamingRequest(
@@ -91,7 +175,7 @@ class YouTubeStreamResolver(
             "User-Agent" to getUserAgentForUrl(url),
             "Accept" to "*/*"
         )
-        if (!isGoogleVideo) {
+        if (!isGoogleVideo && !url.startsWith("file:")) {
             val origin = if (isMusicOrigin || url.contains("c=WEB_REMIX")) "https://music.youtube.com" else "https://www.youtube.com"
             headers["Origin"] = origin
             headers["Referer"] = "$origin/"
@@ -355,6 +439,19 @@ class YouTubeStreamResolver(
                 if (allResult.isSuccess) {
                     val streams = allResult.getOrThrow()
 
+                    // 1. If HLS manifest available, use single HLS master playlist for video
+                    // ExoPlayer automatically exposes all audio and video qualities under Audio Selection & Video Selection,
+                    // without showing redundant individual source buttons!
+                    val hlsUrl = streams.hlsUrl
+                    if (!hlsUrl.isNullOrEmpty()) {
+                        val playableHlsUrl = getSortedHlsUrl(videoId, hlsUrl)
+                        println("RealNewPipe: Using sorted HLS master playlist for video ($playableHlsUrl)")
+                        return ExtractionResult.Success(
+                            Streamable.Media.Server(listOf(createHlsSource(playableHlsUrl)), merged = false)
+                        )
+                    }
+
+                    // 2. Fallback if HLS unavailable: Progressive video + audio
                     if (targetHeight != null) {
                         // User specifically selected a height (e.g. 1080p, 720p, 480p, 360p)
                         val selectedVideo = streams.videoOnly.minByOrNull { format ->
@@ -386,17 +483,6 @@ class YouTubeStreamResolver(
                             )
                         }
                     } else {
-                        // targetHeight == null: Expose ALL available video qualities
-                        val sources = mutableListOf<Streamable.Source.Http>()
-
-                        // 1. If HLS manifest available, add as "Auto"
-                        val hlsUrl = streams.hlsUrl
-                        if (!hlsUrl.isNullOrEmpty()) {
-                            println("RealNewPipe: Adding HLS master playlist as Auto")
-                            sources.add(createHlsSource(hlsUrl))
-                        }
-
-                        // 2. Add all distinct progressive video qualities (1080p, 720p, 480p, 360p, 240p, 144p)
                         val distinctVideos = (streams.videoOnly + streams.muxed)
                             .mapNotNull { format ->
                                 val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull()
@@ -408,21 +494,19 @@ class YouTubeStreamResolver(
                                 HEIGHT_REGEX.find(it.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                             }
 
-                        distinctVideos.forEach { vFormat ->
+                        val sources = distinctVideos.map { vFormat ->
                             val h = HEIGHT_REGEX.find(vFormat.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 360
-                            sources.add(
-                                Streamable.Source.Http(
-                                    request = createStreamingRequest(vFormat.url!!),
-                                    type = Streamable.SourceType.Progressive,
-                                    quality = h,
-                                    title = "${h}p",
-                                    isVideo = true
-                                )
+                            Streamable.Source.Http(
+                                request = createStreamingRequest(vFormat.url!!),
+                                type = Streamable.SourceType.Progressive,
+                                quality = h,
+                                title = "${h}p",
+                                isVideo = true
                             )
                         }
 
                         if (sources.isNotEmpty()) {
-                            println("RealNewPipe: Returning ${sources.size} video qualities: ${sources.map { it.title }}")
+                            println("RealNewPipe: Returning ${sources.size} progressive video sources: ${sources.map { it.title }}")
                             return ExtractionResult.Success(
                                 Streamable.Media.Server(sources, merged = false)
                             )
@@ -606,9 +690,10 @@ class YouTubeStreamResolver(
         // 1. Try HLS / DASH manifest if present for Video
         val hlsUrl = streamingData.hlsManifestUrl ?: streamingData.dashManifestUrl
         if (isVideoRequest && !hlsUrl.isNullOrEmpty()) {
-            println("YouTubeStreamResolver: Using HLS master playlist for video ($hlsUrl)")
+            val playableHlsUrl = getSortedHlsUrl(videoId, hlsUrl)
+            println("YouTubeStreamResolver: Using sorted HLS master playlist for video ($playableHlsUrl)")
             return ExtractionResult.Success(
-                Streamable.Media.Server(listOf(createHlsSource(hlsUrl, isMusicOrigin)), merged = false)
+                Streamable.Media.Server(listOf(createHlsSource(playableHlsUrl, isMusicOrigin)), merged = false)
             )
         }
 
