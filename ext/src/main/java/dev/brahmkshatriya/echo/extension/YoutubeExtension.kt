@@ -88,6 +88,12 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             false
         ),
         SettingSwitch(
+            "Preload Stream on Song Open",
+            "preload_stream",
+            "Resolves the audio stream in the background when a song is opened, so playback starts instantly. Uses a small amount of extra data.",
+            true
+        ),
+        SettingSwitch(
             "Send Listening Data to Google",
             "send_back_to_google",
             "Upload listening history to YouTube Music to improve recommendations and stats (works when logged in).",
@@ -99,7 +105,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             summary = "Select client profile to spoof for playback streams .",
             entryTitles = listOf(
                 "Auto (Smart Cascade - Recommended)",
-                "Android VR (Bypasses bot checks & buffering)",
+                "visionOS (Works with current YouTube URLs)",
                 "iOS (High quality audio & HLS)",
                 "Android TV / Smart TV",
                 "Mobile Web (MWEB)",
@@ -107,7 +113,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             ),
             entryValues = listOf(
                 "auto",
-                "android_vr",
+                "visionos",
                 "ios",
                 "tv",
                 "mweb",

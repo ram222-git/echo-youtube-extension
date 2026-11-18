@@ -29,9 +29,13 @@ import dev.brahmkshatriya.echo.extension.providers.social.FollowManager
 import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
 import dev.brahmkshatriya.echo.extension.providers.social.ShareManager
 import dev.brahmkshatriya.echo.extension.search.YouTubeSearchService
+import dev.brahmkshatriya.echo.extension.streaming.StreamMediaCache
 import dev.brahmkshatriya.echo.extension.streaming.YouTubeStreamResolver
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 
 //Central hub for creating and managing all extension components.
@@ -55,6 +59,9 @@ class ExtensionComponents(
 
     val sendBackToGoogle: Boolean
         get() = settings.getBoolean("send_back_to_google") ?: true
+
+    val preloadStream: Boolean
+        get() = settings.getBoolean("preload_stream") ?: true
 
     //Endpoints (API Communication)
     
@@ -85,9 +92,14 @@ class ExtensionComponents(
         YouTubeAuthManager(api, visitorEndpoint, accountEndpoint)
     }
 
+    val streamCache = StreamMediaCache()
+
     val streamResolver by lazy {
-        YouTubeStreamResolver(api, settings, videoEndpoint, visitorEndpoint)
+        YouTubeStreamResolver(api, settings, videoEndpoint, visitorEndpoint, streamCache)
     }
+
+    /** Long-lived scope for speculative work (stream preloading, solver warm-up). */
+    val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val searchService by lazy {
         YouTubeSearchService(api)
@@ -104,7 +116,7 @@ class ExtensionComponents(
     }
 
     val trackLoader by lazy {
-        TrackLoader(authManager, enhancedSongEndpoint, streamResolver)
+        TrackLoader(authManager, enhancedSongEndpoint, streamResolver, ioScope) { preloadStream }
     }
 
     val radioGenerator by lazy {

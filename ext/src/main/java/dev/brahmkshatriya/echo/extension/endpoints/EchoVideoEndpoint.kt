@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.extension.endpoints
 
 import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
+import dev.brahmkshatriya.echo.extension.streaming.StreamHttpClient
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
@@ -17,7 +18,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -71,7 +71,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         })
     }
 
-    private val okHttpClient by lazy { OkHttpClient() }
+    private val okHttpClient get() = StreamHttpClient.player
 
     suspend fun getSpoofedVideo(
         id: String,
@@ -106,6 +106,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 .header("Content-Type", "application/json")
                 .header("X-YouTube-Client-Name", client.clientNumber)
                 .header("X-YouTube-Client-Version", client.clientVersion)
+                .header("X-Goog-Api-Format-Version", "2")
 
             if (client.isWebClient) {
                 requestBuilder.header("Origin", client.origin)
@@ -346,7 +347,14 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 data class YoutubeFormatResponse(
     val playabilityStatus: PlayabilityStatus? = null,
     val streamingData: StreamingData? = null,
-    val videoDetails: VideoDetails? = null
+    val videoDetails: VideoDetails? = null,
+    val assets: VideoAssets? = null
+)
+
+@Serializable
+data class VideoAssets(
+    /** URL of the player's base.js, used to solve signature/throttling params. */
+    val js: String? = null
 )
 
 @Serializable

@@ -25,21 +25,6 @@ enum class SpoofClient(
     val clientNumber: String = "1",
     val isWebClient: Boolean = false
 ) {
-    ANDROID_VR(
-        id = "android_vr",
-        displayName = "Android VR (Quest 3)",
-        clientName = "ANDROID_VR",
-        clientVersion = "1.65.10",
-        userAgent = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-        platform = "MOBILE",
-        deviceMake = "Oculus",
-        deviceModel = "Quest 3",
-        osName = "Android",
-        osVersion = "12L",
-        origin = "https://www.youtube.com",
-        clientNumber = "28",
-        isWebClient = false
-    ),
     IOS(
         id = "ios",
         displayName = "iOS",
@@ -53,6 +38,21 @@ enum class SpoofClient(
         osVersion = "17.5.1.21F90",
         origin = "https://www.youtube.com",
         clientNumber = "5",
+        isWebClient = false
+    ),
+    VISIONOS(
+        id = "visionos",
+        displayName = "visionOS (Apple Vision Pro)",
+        clientName = "VISIONOS",
+        clientVersion = "1.02",
+        userAgent = "com.google.visionos.youtube/1.02(RealityDevice14,1; U; CPU visionOS 25_6_0 like Mac OS X; US)",
+        platform = "MOBILE",
+        deviceMake = "Apple",
+        deviceModel = "RealityDevice14,1",
+        osName = "visionOS",
+        osVersion = "25.6.0.23O471",
+        origin = "https://www.youtube.com",
+        clientNumber = "101",
         isWebClient = false
     ),
     TV(

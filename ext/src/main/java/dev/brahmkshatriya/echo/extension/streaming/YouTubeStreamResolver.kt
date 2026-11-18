@@ -9,18 +9,26 @@ import dev.brahmkshatriya.echo.extension.endpoints.EchoVideoEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.YoutubeFormatResponse
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 
 class YouTubeStreamResolver(
     private val api: YoutubeiApi,
     private val settings: Settings,
     private val videoEndpoint: EchoVideoEndpoint,
-    private val visitorEndpoint: EchoVisitorEndpoint
+    private val visitorEndpoint: EchoVisitorEndpoint,
+    private val cache: StreamMediaCache = StreamMediaCache()
 ) {
     companion object {
         private val HEIGHT_REGEX = Regex("(\\d+)p")
+        private const val PROBE_TIMEOUT_MS = 800L
     }
 
     private fun getRealNewPipe() = RealNewPipeVideoFormatsEndpoint()
@@ -29,17 +37,14 @@ class YouTubeStreamResolver(
         YtmKtVideoFormatsEndpoint(api)
     }
 
-    private val probeClient by lazy {
-        okhttp3.OkHttpClient.Builder()
-            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
-    }
+    private val probeClient get() = StreamHttpClient.probe
+
+    /** Sorted HLS master playlist URIs, memoized by the original manifest URL. */
+    private val sortedHlsCache = ConcurrentHashMap<String, String>()
 
     private fun getUserAgentForUrl(url: String): String {
         return when {
-            url.contains("c=ANDROID_VR") -> SpoofClient.ANDROID_VR.userAgent
+            url.contains("c=VISIONOS") -> SpoofClient.VISIONOS.userAgent
             url.contains("c=IOS") -> SpoofClient.IOS.userAgent
             url.contains("c=TVHTML5") -> SpoofClient.TV.userAgent
             url.contains("c=MWEB") -> SpoofClient.MWEB.userAgent
@@ -47,29 +52,53 @@ class YouTubeStreamResolver(
         }
     }
 
-    private fun isStreamPlayable(url: String): Boolean {
+    /**
+     * Single request used as the last-line check for a resolved source. It must NOT
+     * send a `Range` header: googlevideo answers ranged requests with 206 even for
+     * URLs it rejects with 403 for normal playback (verified against the old
+     * spoofed clients), which made a dead source look healthy. Only the response
+     * code matters, and the body is closed immediately.
+     */
+    private fun probeStream(url: String): Boolean {
         if (url.contains(".m3u8") || url.contains("manifest/hls_variant")) return true
-        return runCatching {
-            val req = okhttp3.Request.Builder()
-                .url(url)
-                .header("Range", "bytes=0-0")
-                .header("User-Agent", getUserAgentForUrl(url))
-                .build()
-            probeClient.newCall(req).execute().use { resp ->
-                val code = resp.code
-                val isPlayable = code == 200 || code == 206 || (code in 300..399)
-                if (code == 403) {
-                    println("YouTubeStreamResolver: Stream health check failed with HTTP 403 Forbidden for ${url.take(60)}...")
-                    false
-                } else {
-                    println("YouTubeStreamResolver: Stream health check HTTP $code for ${url.take(60)}... (playable=$isPlayable)")
-                    isPlayable
-                }
+        val req = okhttp3.Request.Builder()
+            .url(url)
+            .header("User-Agent", getUserAgentForUrl(url))
+            .build()
+        return probeClient.newCall(req).execute().use { resp ->
+            if (resp.code == 403) {
+                println("YouTubeStreamResolver: probe got HTTP 403 for ${url.take(60)}...")
+                false
+            } else {
+                true
             }
-        }.getOrElse {
-            println("YouTubeStreamResolver: Stream health check error: ${it.message}, defaulting to playable")
-            true
         }
+    }
+
+    /**
+     * Runs [probeStream] on IO with a short budget. A timeout, network error or any
+     * non-403 response is treated as playable, so a slow edge node can never reject
+     * the source. The OkHttp call timeout in [StreamHttpClient.probe] is the real
+     * upper bound, because a blocking `execute()` ignores coroutine cancellation.
+     */
+    private suspend fun probePlayable(url: String): Boolean = withContext(Dispatchers.IO) {
+        val result = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+            try {
+                probeStream(url)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                println("YouTubeStreamResolver: probe error (${e.message}), assuming playable")
+                true
+            }
+        }
+        result ?: true
+    }
+
+    private suspend fun probeAllPlayable(vararg urls: String): Boolean = coroutineScope {
+        urls.map { url -> async(Dispatchers.IO) { probePlayable(url) } }
+            .map { it.await() }
+            .all { it }
     }
 
     private fun createHlsSource(masterUrl: String, isMusicOrigin: Boolean = true): Streamable.Source.Http {
@@ -83,6 +112,14 @@ class YouTubeStreamResolver(
     }
 
     private fun getSortedHlsUrl(videoId: String, hlsUrl: String): String {
+        sortedHlsCache[hlsUrl]?.let { cached ->
+            val stillValid = !cached.startsWith("file:") || runCatching {
+                java.io.File(java.net.URI(cached)).exists()
+            }.getOrDefault(false)
+            if (stillValid) return cached
+            sortedHlsCache.remove(hlsUrl)
+        }
+
         return runCatching {
             // Clean up stale temp files older than 1 hour
             runCatching {
@@ -102,7 +139,7 @@ class YouTubeStreamResolver(
                 .header("Accept", "*/*")
                 .build()
 
-            val rawM3u8 = probeClient.newCall(req).execute().use { resp ->
+            val rawM3u8 = StreamHttpClient.hls.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return@runCatching hlsUrl
                 resp.body?.string().orEmpty()
             }
@@ -121,6 +158,7 @@ class YouTubeStreamResolver(
                 tempFile.toURI().toString()
             }
             println("YouTubeStreamResolver: Re-ordered HLS master playlist (highest quality first) -> $fileUri")
+            sortedHlsCache[hlsUrl] = fileUri
             fileUri
         }.getOrElse {
             println("YouTubeStreamResolver: Failed to sort HLS playlist, using direct URL: ${it.message}")
@@ -191,6 +229,9 @@ class YouTubeStreamResolver(
         )
     }
 
+    private fun spoofSetting(): String =
+        settings.getString("spoof_stream_client")?.trim()?.lowercase() ?: "auto"
+
     suspend fun resolveStreamable(videoId: String): Streamable.Media {
         return resolveStreamable(null, videoId)
     }
@@ -199,8 +240,19 @@ class YouTubeStreamResolver(
         streamable: Streamable?,
         videoId: String
     ): Streamable.Media {
-        println("Loading streamable media for video ID: $videoId, title: ${streamable?.title}")
-        return resolveStreamableInternal(streamable, videoId)
+        val type = streamable?.extras?.get("type") ?: "audio"
+        val height = streamable?.extras?.get("height") ?: "0"
+        val key = "$videoId|$type|$height|${spoofSetting()}"
+        println("Loading streamable media for video ID: $videoId (type=$type)")
+        return try {
+            cache.getOrResolve(key) { resolveStreamableInternal(streamable, videoId) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Never keep a half-broken result around: a retry must hit the network.
+            cache.invalidate("$videoId|$type|")
+            throw e
+        }
     }
 
     suspend fun resolveBackground(videoId: String): Streamable.Media {
@@ -211,10 +263,37 @@ class YouTubeStreamResolver(
         val targetHeight = streamable?.extras?.get("height")?.toIntOrNull()
             ?: streamable?.quality?.takeIf { it > 0 }
             ?: 720
+        val key = "$videoId|background|$targetHeight|${spoofSetting()}"
+        return try {
+            cache.getOrResolve(key) { resolveBackgroundInternal(videoId, targetHeight) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            cache.invalidate("$videoId|background|")
+            throw e
+        }
+    }
+
+    private suspend fun resolveBackgroundInternal(videoId: String, targetHeight: Int): Streamable.Media {
         println("Loading background video for video ID: $videoId at ${targetHeight}p")
 
-        // 1. Try RealNewPipe: check muxed stream first, then separate video
-        val realNewPipeUrl = runCatching {
+        // 1. Fast path: visionOS (single player request, URLs that actually play)
+        val spoofedVideoUrl = runCatching {
+            val res = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = true, targetHeight = targetHeight)
+            if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
+                val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
+                videoSource?.request?.url
+            } else null
+        }.getOrNull() ?: runCatching {
+            val res = trySpoofedExtractor(videoId, SpoofClient.IOS, isVideoRequest = true, targetHeight = targetHeight)
+            if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
+                val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
+                videoSource?.request?.url
+            } else null
+        }.getOrNull()
+
+        // 2. Fallback: RealNewPipe (muxed first, then separate video)
+        val realNewPipeUrl = spoofedVideoUrl ?: runCatching {
             val muxedStreams = getRealNewPipe().getMuxedVideoStreams(videoId).getOrNull() ?: emptyList()
             val muxedMatch = muxedStreams.firstOrNull { format ->
                 val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
@@ -232,23 +311,8 @@ class YouTubeStreamResolver(
             }
         }.getOrNull()
 
-        // 2. Try Spoofed clients (iOS / Android VR / TV)
-        val spoofedVideoUrl = realNewPipeUrl ?: runCatching {
-            val res = trySpoofedExtractor(videoId, SpoofClient.IOS, isVideoRequest = true, targetHeight = targetHeight)
-            if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
-                val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
-                videoSource?.request?.url
-            } else null
-        }.getOrNull() ?: runCatching {
-            val res = trySpoofedExtractor(videoId, SpoofClient.ANDROID_VR, isVideoRequest = true, targetHeight = targetHeight)
-            if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
-                val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
-                videoSource?.request?.url
-            } else null
-        }.getOrNull()
-
-        // 3. Fallback to YtmKt
-        val backgroundUrl = spoofedVideoUrl ?: runCatching {
+        // 3. Fallback: YtmKt
+        val backgroundUrl = realNewPipeUrl ?: runCatching {
             val muxedStreams = ytmKtEndpoint.getMuxedVideoStreams(videoId).getOrNull() ?: emptyList()
             val muxedMatch = muxedStreams.firstOrNull { format ->
                 val h = HEIGHT_REGEX.find(format.mimeType)?.groupValues?.get(1)?.toIntOrNull() ?: 0
@@ -285,11 +349,11 @@ class YouTubeStreamResolver(
 
         val errorReasons = mutableListOf<String>()
 
-        val spoofSetting = settings.getString("spoof_stream_client")?.trim()?.lowercase() ?: "auto"
-        val specificClient = SpoofClient.fromId(spoofSetting)
-        println("resolveStreamableInternal: spoof_stream_client setting = '$spoofSetting', specificClient = ${specificClient?.displayName ?: "Auto"}")
+        val spoofClientSetting = spoofSetting()
+        val specificClient = SpoofClient.fromId(spoofClientSetting)
+        println("resolveStreamableInternal: spoof_stream_client setting = '$spoofClientSetting', specificClient = ${specificClient?.displayName ?: "Auto"}")
 
-        // 1. If user selected a specific spoof client (e.g. Android VR, iOS, TV, MWEB, WEB_REMIX), try it first!
+        // 1. If user selected a specific spoof client (visionOS, iOS, TV, MWEB, WEB_REMIX), try it first!
         if (specificClient != null) {
             val spoofResult = trySpoofedExtractor(videoId, specificClient, isVideoRequest, targetHeight)
             if (spoofResult is ExtractionResult.Success) {
@@ -302,7 +366,19 @@ class YouTubeStreamResolver(
         
         if (isVideoRequest) {
             // Video request cascade
-            // 1. Primary: RealNewPipe extracts HLS + 1080p, 720p, 480p, 360p, 240p, 144p with dynamic JS deciphering (guaranteed HTTP 206)
+            // 1. Fast path: visionOS. One player request and it returns an HLS
+            //    manifest plus already-signed progressive URLs that actually play.
+            //    (iOS/TV currently hand out URLs that 403 on playback.)
+            val visionOsResult = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = true, targetHeight)
+            if (visionOsResult is ExtractionResult.Success) {
+                println("Successfully loaded video streamable using ${SpoofClient.VISIONOS.displayName}")
+                return visionOsResult.media
+            } else if (visionOsResult is ExtractionResult.Error) {
+                errorReasons.add("${SpoofClient.VISIONOS.displayName}: ${visionOsResult.reason}")
+            }
+
+            // 2. Fallback: RealNewPipe extracts HLS + all progressive qualities with
+            //    dynamic JS deciphering (most robust, but slower).
             println("RealNewPipe extractor for video ID: $videoId (Video)")
             val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = true, targetHeight)
             if (realNewPipeResult is ExtractionResult.Success) {
@@ -312,12 +388,9 @@ class YouTubeStreamResolver(
                 errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
             }
 
-            // 2. Fallback: Spoofed clients
-            val videoCascade = if (specificClient != null) {
-                listOf(SpoofClient.IOS, SpoofClient.ANDROID_VR, SpoofClient.TV).filter { it != specificClient }
-            } else {
-                listOf(SpoofClient.IOS, SpoofClient.ANDROID_VR, SpoofClient.TV)
-            }
+            // 3. Fallback: other spoofed clients
+            val videoCascade = listOf(SpoofClient.IOS, SpoofClient.TV)
+                .filter { it != specificClient }
 
             for (client in videoCascade) {
                 val res = trySpoofedExtractor(videoId, client, isVideoRequest = true, targetHeight)
@@ -329,7 +402,17 @@ class YouTubeStreamResolver(
                 }
             }
 
-            // Fallback 1: YouTube Music API
+            // 3. Fallback: YtmKt (same Innertube family, different client)
+            println("YtmKt extractor for video ID: $videoId (Video)")
+            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = true, targetHeight)
+            if (ytmKtResult is ExtractionResult.Success) {
+                println("Successfully loaded video streamable using YtmKt library")
+                return ytmKtResult.media
+            } else if (ytmKtResult is ExtractionResult.Error) {
+                errorReasons.add("YtmKt: ${ytmKtResult.reason}")
+            }
+
+            // 4. Fallback: YouTube Music API
             println("YouTube Music API extractor for video ID: $videoId (Video)")
             val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = true, targetHeight)
             if (youtubeMusicResult is ExtractionResult.Success) {
@@ -339,7 +422,7 @@ class YouTubeStreamResolver(
                 errorReasons.add("YouTube Music API: ${youtubeMusicResult.reason}")
             }
 
-            // Fallback 2: Restricted / Age-Restricted Video Extractor
+            // 5. Fallback: Restricted / Age-Restricted Video Extractor
             println("Restricted extractor for video ID: $videoId (Video)")
             val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = true, targetHeight)
             if (restrictedResult is ExtractionResult.Success) {
@@ -348,19 +431,21 @@ class YouTubeStreamResolver(
             } else if (restrictedResult is ExtractionResult.Error) {
                 errorReasons.add("Restricted Extractor: ${restrictedResult.reason}")
             }
-
-            // Fallback 3: YtmKt
-            println("YtmKt extractor for video ID: $videoId (Video)")
-            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = true, targetHeight)
-            if (ytmKtResult is ExtractionResult.Success) {
-                println("Successfully loaded video streamable using YtmKt library")
-                return ytmKtResult.media
-            } else if (ytmKtResult is ExtractionResult.Error) {
-                errorReasons.add("YtmKt: ${ytmKtResult.reason}")
-            }
         } else {
             // Audio request cascade
-            // 1. Primary: RealNewPipe extracts OPUS (160kbps, 70kbps, 50kbps) + AAC (128kbps, 48kbps) with dynamic JS deciphering (guaranteed HTTP 206)
+            // 1. Fast path: visionOS. One player request, returns already-signed
+            //    direct URLs with all audio qualities. (iOS/TV URLs currently 403
+            //    on real playback, so they are only fallbacks.)
+            val visionOsResult = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = false, targetHeight)
+            if (visionOsResult is ExtractionResult.Success) {
+                println("Successfully loaded audio streamable using ${SpoofClient.VISIONOS.displayName}")
+                return visionOsResult.media
+            } else if (visionOsResult is ExtractionResult.Error) {
+                errorReasons.add("${SpoofClient.VISIONOS.displayName}: ${visionOsResult.reason}")
+            }
+
+            // 2. Fallback: RealNewPipe extracts OPUS (160/70/50 kbps) + AAC (128/48 kbps)
+            //    with dynamic JS deciphering.
             println("RealNewPipe extractor for video ID: $videoId (Audio - Opus/AAC)")
             val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = false, targetHeight)
             if (realNewPipeResult is ExtractionResult.Success) {
@@ -370,18 +455,13 @@ class YouTubeStreamResolver(
                 errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
             }
 
-            // 2. Fallback: YtmKt (also supports Opus)
-            println("YtmKt extractor for video ID: $videoId (Audio)")
-            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = false, targetHeight)
-            if (ytmKtResult is ExtractionResult.Success) {
-                println("Successfully loaded audio streamable using YtmKt")
-                return ytmKtResult.media
-            } else if (ytmKtResult is ExtractionResult.Error) {
-                errorReasons.add("YtmKt: ${ytmKtResult.reason}")
-            }
+            // 3. Fallback: other spoofed clients
+            val audioCascade = listOf(
+                SpoofClient.IOS,
+                SpoofClient.WEB_REMIX,
+                SpoofClient.TV
+            ).filter { it != specificClient }
 
-            // 3. Fallback: Spoof clients with stream health verification
-            val audioCascade = listOf(SpoofClient.ANDROID_VR, SpoofClient.IOS, SpoofClient.WEB_REMIX, SpoofClient.TV)
             for (client in audioCascade) {
                 val res = trySpoofedExtractor(videoId, client, isVideoRequest = false, targetHeight)
                 if (res is ExtractionResult.Success) {
@@ -392,7 +472,17 @@ class YouTubeStreamResolver(
                 }
             }
 
-            // 4. Fallback: YouTube Music API (AAC)
+            // 4. Fallback: YtmKt (also supports Opus)
+            println("YtmKt extractor for video ID: $videoId (Audio)")
+            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = false, targetHeight)
+            if (ytmKtResult is ExtractionResult.Success) {
+                println("Successfully loaded audio streamable using YtmKt")
+                return ytmKtResult.media
+            } else if (ytmKtResult is ExtractionResult.Error) {
+                errorReasons.add("YtmKt: ${ytmKtResult.reason}")
+            }
+
+            // 5. Fallback: YouTube Music API (AAC)
             println("YouTube Music API extractor for video ID: $videoId (Audio - AAC fallback)")
             val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = false, targetHeight)
             if (youtubeMusicResult is ExtractionResult.Success) {
@@ -402,7 +492,7 @@ class YouTubeStreamResolver(
                 errorReasons.add("YouTube Music API: ${youtubeMusicResult.reason}")
             }
 
-            // 5. Fallback: Restricted / Age-Restricted Video Extractor
+            // 6. Fallback: Restricted / Age-Restricted Video Extractor
             println("Trying Restricted Video Extractor for video ID: $videoId (Audio)")
             val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = false, targetHeight)
             if (restrictedResult is ExtractionResult.Success) {
@@ -677,7 +767,7 @@ class YouTubeStreamResolver(
         }
     }
 
-    private fun extractMediaFromFormatResponse(
+    private suspend fun extractMediaFromFormatResponse(
         videoId: String,
         videoResponse: YoutubeFormatResponse,
         isVideoRequest: Boolean,
@@ -686,6 +776,9 @@ class YouTubeStreamResolver(
     ): ExtractionResult {
         val streamingData = videoResponse.streamingData
             ?: return ExtractionResult.Error("Player response contains no streaming data")
+
+        // Decipher against the base.js this response actually came from.
+        YouTubeSignatureDeobfuscator.setPlayerJsUrl(videoResponse.assets?.js)
 
         // 1. Try HLS / DASH manifest if present for Video
         val hlsUrl = streamingData.hlsManifestUrl ?: streamingData.dashManifestUrl
@@ -781,34 +874,36 @@ class YouTubeStreamResolver(
                     isVideo = false
                 )
                 println("YouTubeStreamResolver: Video request (targetHeight=$targetHeight). Selected: ${videoSource.title} (itag=${selectedVideo.itag}), audio: itag=${bestAudio.itag} (${audioBitrate}kbps). Returning merged video+audio.")
-                if (!isStreamPlayable(selectedVideo.url) || !isStreamPlayable(bestAudio.url)) {
-                    println("YouTubeStreamResolver: Extracted video/audio stream URL failed health check (HTTP 403 Forbidden). Rejecting extractor result.")
+                // One parallel check for the two streams that will actually play.
+                if (!probeAllPlayable(selectedVideo.url, bestAudio.url)) {
+                    println("YouTubeStreamResolver: Extracted video/audio stream URL rejected with HTTP 403.")
                     return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
                 }
                 return ExtractionResult.Success(Streamable.Media.Server(listOf(videoSource, audioSource), merged = true))
             } else if (distinctVideoFormats.isNotEmpty()) {
-                // Return all available playable video qualities
-                val playableVideos = distinctVideoFormats.filter { isStreamPlayable(it.url) }
-                if (playableVideos.isNotEmpty()) {
-                    val sources = playableVideos.map { format ->
-                        val h = format.height!!.toInt()
-                        Streamable.Source.Http(
-                            request = createStreamingRequest(format.url, isMusicOrigin = isMusicOrigin),
-                            type = Streamable.SourceType.Progressive,
-                            quality = h,
-                            title = "${h}p",
-                            isVideo = true
-                        )
-                    }
-                    println("YouTubeStreamResolver: Video request (targetHeight=null). Returning ${sources.size} playable video qualities: ${sources.map { it.title }}")
-                    return ExtractionResult.Success(Streamable.Media.Server(sources, merged = false))
+                val sources = distinctVideoFormats.map { format ->
+                    val h = format.height!!.toInt()
+                    Streamable.Source.Http(
+                        request = createStreamingRequest(format.url, isMusicOrigin = isMusicOrigin),
+                        type = Streamable.SourceType.Progressive,
+                        quality = h,
+                        title = "${h}p",
+                        isVideo = true
+                    )
                 }
+                // Quality list is ordered best-first; verify only the one that will play.
+                if (!probePlayable(sources.first().request.url)) {
+                    println("YouTubeStreamResolver: Top video source rejected with HTTP 403, rejecting extractor result")
+                    return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
+                }
+                println("YouTubeStreamResolver: Video request (targetHeight=null). Returning ${sources.size} video qualities: ${sources.map { it.title }}")
+                return ExtractionResult.Success(Streamable.Media.Server(sources, merged = false))
             }
 
             // Fallback: Muxed formats if separate streams unavailable and playable
-            val muxedFormats = resolved.filter { ((it.itag == 18L || it.itag == 22L) || (it.isVideo && it.mimeType.contains("mp4a"))) && isStreamPlayable(it.url) }
-            if (muxedFormats.isNotEmpty()) {
-                val muxed = muxedFormats.first()
+            val muxedFormats = resolved.filter { (it.itag == 18L || it.itag == 22L) || (it.isVideo && it.mimeType.contains("mp4a")) }
+            val muxed = muxedFormats.firstOrNull { probePlayable(it.url) }
+            if (muxed != null) {
                 val h = muxed.height?.toInt() ?: if (muxed.itag == 18L) 360 else 720
                 val muxedSource = Streamable.Source.Http(
                     request = createStreamingRequest(muxed.url, isMusicOrigin = isMusicOrigin),
@@ -824,12 +919,13 @@ class YouTubeStreamResolver(
             return ExtractionResult.Error("No playable video formats found")
         }
 
-        // Audio extraction: include ALL playable audio qualities so the user can choose in the Source panel.
-        val adaptiveAudio = resolved.filter { it.isAudio && it.itag != 18L && isStreamPlayable(it.url) }.sortedByDescending {
+        // Audio extraction: include ALL audio qualities so the user can choose in the Source panel.
+        // No per-format probing here: quality lists must be built without network round-trips.
+        val adaptiveAudio = resolved.filter { it.isAudio && it.itag != 18L }.sortedByDescending {
             normalizeAudioBitrate(it.itag, it.bitrate)
         }
-        val muxedAudio = resolved.firstOrNull { it.itag == 18L && isStreamPlayable(it.url) }
-        println("YouTubeStreamResolver: Audio extraction for $videoId: ${adaptiveAudio.size} adaptive audio formats, muxed format 18 playable: ${muxedAudio != null}")
+        val muxedAudio = resolved.firstOrNull { it.itag == 18L }
+        println("YouTubeStreamResolver: Audio extraction for $videoId: ${adaptiveAudio.size} adaptive audio formats, muxed format 18 present: ${muxedAudio != null}")
 
         val sources = mutableListOf<Streamable.Source.Http>()
 
@@ -847,7 +943,7 @@ class YouTubeStreamResolver(
             )
         }
 
-        // Also add progressive muxed format 18 (AAC 128kbps) if playable and not already added
+        // Also add progressive muxed format 18 (AAC 128kbps) if not already added
         if (muxedAudio != null && sources.none { it.quality == 128 }) {
             sources.add(
                 Streamable.Source.Http(
@@ -862,6 +958,14 @@ class YouTubeStreamResolver(
 
         if (sources.isEmpty()) {
             return ExtractionResult.Error("No playable audio streams found")
+        }
+
+        // Verify only the source Echo will start with; a dead top source means the
+        // whole client response is unusable (all URLs come from the same client), so
+        // let the cascade move to the next extractor instead of caching a bad result.
+        if (!probePlayable(sources.first().request.url)) {
+            println("YouTubeStreamResolver: Top audio source rejected with HTTP 403, rejecting extractor result")
+            return ExtractionResult.Error("Audio stream failed health check (HTTP 403 Forbidden)")
         }
 
         println("YouTubeStreamResolver: Returning ${sources.size} audio qualities: ${sources.map { "Quality ${it.quality}" }}")
