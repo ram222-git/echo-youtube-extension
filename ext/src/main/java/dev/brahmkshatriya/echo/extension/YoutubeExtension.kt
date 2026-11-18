@@ -249,23 +249,11 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             }
         }
 
-        // 3. Like Spotify extension: Include the artist's shelves (Albums, Singles, etc.) if not already present
-        val hasArtistReleases = shelves.any { shelf ->
-            val title = shelf.title.lowercase()
-            title.contains("more from") || title.contains("albums") || title.contains("singles") || title.contains("discography")
-        }
-        if (!hasArtistReleases) {
-            val artist = track.artists.firstOrNull()?.takeIf { it.id.isNotBlank() && it.name != "Unknown" }
-                ?: run {
-                    val loaded = runCatching { loadTrack(track, false) }.getOrNull()
-                    loaded?.artists?.firstOrNull()?.takeIf { it.id.isNotBlank() && it.name != "Unknown" }
-                }
-
-            if (artist != null) {
-                val artistShelves = runCatching { getArtistMediaItems(artist) }.getOrNull().orEmpty()
-                shelves.addAll(artistShelves)
-            }
-        }
+        // 3. Do NOT merge the artist page shelves here.
+        // The related response already contains YouTube Music's "More from <artist>" carousel.
+        // Appending the whole artist page (Top songs, Albums, Singles & EPs, Videos,
+        // Featured on, Fans might also like) added shelves the song info page never shows
+        // in YouTube Music. The artist page keeps using getArtistMediaItems() on its own page.
 
         shelves
     }.toFeed()
