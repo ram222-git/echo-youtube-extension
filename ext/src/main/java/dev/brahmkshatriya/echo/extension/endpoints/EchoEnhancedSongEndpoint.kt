@@ -169,8 +169,12 @@ class EchoEnhancedSongEndpoint(
     companion object {
         /**
          * Create streamable configuration with a single "YouTube" server entry for audio,
-         * and optionally a "YouTube Video" server entry.
-         * All actual quality options are exposed as Sources when the server is resolved.
+         * and optionally a single "YouTube Video" server entry.
+         *
+         * For videos the resolver returns either an HLS manifest (all qualities
+         * selectable in Echo's quality sheet, audio included) or — when the client
+         * response has no HLS (age-restricted web lanes) — a merged
+         * (best video + best audio) pair, which Echo plays with sound.
          */
         fun createDefaultStreamables(
             videoId: String,
@@ -188,7 +192,6 @@ class EchoEnhancedSongEndpoint(
                 return listOf(audioServer)
             }
 
-            // Single "YouTube Video" server — all video qualities are returned as Sources on resolve
             val videoServer = Streamable.server(
                 id = "yt_video_$videoId",
                 quality = 0,

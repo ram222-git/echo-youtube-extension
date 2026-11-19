@@ -122,6 +122,17 @@ enum class SpoofClient(
         origin = "https://www.youtube.com",
         clientNumber = "62",
         isWebClient = true
+    ),
+    WEB_EMBEDDED(
+        id = "web_embedded",
+        displayName = "YouTube Embedded",
+        clientName = "WEB_EMBEDDED_PLAYER",
+        clientVersion = "2.20260708.00.00",
+        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        platform = "DESKTOP",
+        origin = "https://www.youtube.com",
+        clientNumber = "56",
+        isWebClient = true
     );
 
     fun buildClientContext(visitorId: String? = null): JsonObject {

@@ -114,11 +114,126 @@ class EchoVideoEndpoint(
         println("EchoVideoEndpoint: live signatureTimestamp unavailable (${it.javaClass.simpleName}); using fallback")
     }.getOrNull() ?: FALLBACK_SIGNATURE_TIMESTAMP
 
+    /**
+     * Embedded-player configuration scraped from `youtube.com/embed/<id>`:
+     * a live signature timestamp and the encryptedHostFlags the embedded player
+     * must echo back for age-restricted content. `Referer: reddit.com` mirrors
+     * how Metrolist fetches this page (reddit is a whitelisted embedder).
+     */
+    private data class EmbedConfig(val signatureTimestamp: Int?, val encryptedHostFlags: String?)
+
+    private fun fetchEmbedConfig(id: String, userCookie: String?): EmbedConfig? = runCatching {
+        val cookie = userCookie?.split(';')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() && !it.startsWith("PREF=", ignoreCase = true) }
+            ?.joinToString("; ")
+            ?.takeIf { it.isNotEmpty() }
+        val request = Request.Builder()
+            .url("https://www.youtube.com/embed/$id?html5=1")
+            .header("User-Agent", SpoofClient.WEB_EMBEDDED.userAgent)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Referer", "https://www.reddit.com/")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .apply { cookie?.let { header("Cookie", it) } }
+            .build()
+        okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return@runCatching null
+            val html = response.body?.string().orEmpty()
+            val sts = Regex("(?:signatureTimestamp|sts)\\s*:\\s*([0-9]{5})").find(html)
+                ?.groupValues?.get(1)?.toIntOrNull()
+                ?: Regex("\"STS\":\\s*([0-9]{5})").find(html)?.groupValues?.get(1)?.toIntOrNull()
+            val flags = Regex("\"encryptedHostFlags\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1)
+            println("EchoVideoEndpoint: embed config for $id -> sts=${sts ?: "none"}, hostFlags=${if (flags != null) "present" else "none"}")
+            EmbedConfig(sts, flags)
+        }
+    }.onFailure {
+        println("EchoVideoEndpoint: embed config fetch failed (${it.javaClass.simpleName}: ${it.message})")
+    }.getOrNull()
+
+    /**
+     * WEB_EMBEDDED_PLAYER lane: impersonates a Reddit embed (thirdParty.embedUrl =
+     * reddit.com) with the scraped encryptedHostFlags. Embedded responses include
+     * an HLS manifest for age-restricted videos, which restores the full quality
+     * grid with audio — the technique Metrolist uses.
+     */
+    private suspend fun tryWebEmbedded(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
+        runCatching {
+            val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
+            val config = fetchEmbedConfig(id, userCookie)
+            val payload = buildJsonObject {
+                put("videoId", id)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("playbackContext", buildJsonObject {
+                    put("contentPlaybackContext", buildJsonObject {
+                        put("html5Preference", "HTML5_PREF_WANTS")
+                        put("signatureTimestamp", config?.signatureTimestamp ?: signatureTimestamp(id))
+                        config?.encryptedHostFlags?.let { put("encryptedHostFlags", it) }
+                    })
+                })
+                put("thirdParty", buildJsonObject {
+                    put("embedUrl", "https://www.reddit.com/")
+                })
+                put("context", SpoofClient.WEB_EMBEDDED.buildClientContext(api.visitor_id))
+            }
+
+            val cookieMap = if (!userCookie.isNullOrBlank()) CookieParser.parse(userCookie) else emptyMap()
+            val authHeader = if (cookieMap.isNotEmpty()) {
+                CookieParser.generateDynamicAuthHeader(cookieMap, "https://www.youtube.com")
+            } else ""
+
+            val requestBuilder = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+                .header("User-Agent", SpoofClient.WEB_EMBEDDED.userAgent)
+                .header("Content-Type", "application/json")
+                .header("Origin", "https://www.youtube.com")
+                .header("X-Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
+                .header("X-YouTube-Client-Name", SpoofClient.WEB_EMBEDDED.clientNumber)
+                .header("X-YouTube-Client-Version", SpoofClient.WEB_EMBEDDED.clientVersion)
+                .header("X-Goog-Api-Format-Version", "2")
+                .header("X-Goog-AuthUser", "0")
+                .apply { api.visitor_id?.let { header("X-Goog-Visitor-Id", it) } }
+
+            if (!userCookie.isNullOrBlank()) {
+                requestBuilder.header("Cookie", userCookie)
+            }
+            if (authHeader.isNotEmpty()) {
+                requestBuilder.header("Authorization", authHeader)
+            }
+
+            requestBuilder.post(payload.toString().toRequestBody("application/json".toMediaType()))
+
+            val (bodyString, setCookies) = okHttpClient.newCall(requestBuilder.build()).execute().use { response ->
+                response.body?.string().orEmpty() to response.headers("Set-Cookie")
+            }
+            if (setCookies.isNotEmpty()) {
+                RealNewPipeVideoFormatsEndpoint.cookieUpdateListener?.invoke(setCookies)
+            }
+
+            val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
+            val formats = resp.streamingData?.formats.orEmpty() + resp.streamingData?.adaptiveFormats.orEmpty()
+            val hasHls = !resp.streamingData?.hlsManifestUrl.isNullOrEmpty()
+            if (formats.isNotEmpty() || hasHls) {
+                println("EchoVideoEndpoint: tryWebEmbedded succeeded for $id. Formats: ${formats.size}, HLS: $hasHls")
+                resp
+            } else {
+                println("EchoVideoEndpoint: tryWebEmbedded returned no playable formats for $id. Status: ${resp.playabilityStatus?.status}, Reason: ${resp.playabilityStatus?.reason}")
+                null
+            }
+        }.onFailure {
+            println("EchoVideoEndpoint: tryWebEmbedded failed for $id: ${it.javaClass.simpleName} - ${it.message}")
+        }.getOrNull()
+    }
+
     suspend fun getSpoofedVideo(
         id: String,
         client: SpoofClient,
         cookie: String? = null
     ): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
+        if (client == SpoofClient.WEB_EMBEDDED) {
+            return@withContext tryWebEmbedded(id, cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie)
+        }
         runCatching {
             val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
             val poToken = if (client.requiresStreamToken) playerToken(id) else null
@@ -158,6 +273,8 @@ class EchoVideoEndpoint(
             if (client.isWebClient) {
                 requestBuilder.header("Origin", client.origin)
                 requestBuilder.header("X-Origin", client.origin)
+                requestBuilder.header("Referer", "${client.origin}/")
+                api.visitor_id?.let { requestBuilder.header("X-Goog-Visitor-Id", it) }
             }
 
             if (!userCookie.isNullOrBlank()) {
@@ -259,10 +376,13 @@ class EchoVideoEndpoint(
                 .header("Content-Type", "application/json")
                 .header("Origin", "https://music.youtube.com")
                 .header("X-Origin", "https://music.youtube.com")
+                .header("Referer", "https://music.youtube.com/")
                 .header("X-YouTube-Client-Name", "67")
                 .header("X-YouTube-Client-Version", "1.20260928.13.00")
+                .header("X-Goog-Api-Format-Version", "2")
                 .header("X-Goog-AuthUser", "0")
                 .header("X-Youtube-Bootstrap-Logged-In", "true")
+                .apply { api.visitor_id?.let { header("X-Goog-Visitor-Id", it) } }
 
             if (!cookie.isNullOrBlank()) {
                 requestBuilder.header("Cookie", cookie)
@@ -332,10 +452,13 @@ class EchoVideoEndpoint(
                 .header("Content-Type", "application/json")
                 .header("Origin", "https://www.youtube.com")
                 .header("X-Origin", "https://www.youtube.com")
+                .header("Referer", "https://www.youtube.com/")
                 .header("X-YouTube-Client-Name", "62")
                 .header("X-YouTube-Client-Version", "1.20261001.00.00")
+                .header("X-Goog-Api-Format-Version", "2")
                 .header("X-Goog-AuthUser", "0")
                 .header("X-Youtube-Bootstrap-Logged-In", "true")
+                .apply { api.visitor_id?.let { header("X-Goog-Visitor-Id", it) } }
 
             if (!cookie.isNullOrBlank()) {
                 requestBuilder.header("Cookie", cookie)

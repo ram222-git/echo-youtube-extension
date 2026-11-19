@@ -63,6 +63,78 @@ class AuthenticatedPlaybackTest {
         assertTrackPlays(cookie!!, "dQw4w9WgXcQ", client = "web_remix", expectPot = loadEnv("ECHO_YT_POT_URL") != null)
     }
 
+    /**
+     * Video requests must include audio: the resolver returns a merged
+     * (video + audio) pair or an HLS manifest — never a video-only quality list,
+     * which Echo plays without sound.
+     */
+    @Test
+    fun normalTrackVideoPlaysWithAudio() = runTest {
+        val cookie = loadCookie()
+        assumeTrue("ECHO_YT_COOKIE not configured; skipping authenticated test", cookie != null)
+        assertVideoHasAudio(cookie!!, "dQw4w9WgXcQ")
+    }
+
+    @Test
+    fun restrictedTrackVideoPlaysWithAudio() = runTest {
+        val cookie = loadCookie()
+        assumeTrue("ECHO_YT_COOKIE not configured; skipping authenticated test", cookie != null)
+        assumeTrue(
+            "Age-restricted video needs a PO Token provider; set ECHO_YT_POT_URL to run this test",
+            loadEnv("ECHO_YT_POT_URL") != null
+        )
+        assertVideoHasAudio(cookie!!, "hc0ZDaAZQT0")
+    }
+
+    private suspend fun assertVideoHasAudio(cookie: String, videoId: String) {
+        val extension = YoutubeExtension()
+        val settings = MockedSettings()
+        settings.putBoolean("enable_video", true)
+        loadEnv("ECHO_YT_POT_URL")?.let { potUrl ->
+            settings.putString("potoken_mode", "external")
+            settings.putString("potoken_url", potUrl)
+        }
+        extension.setSettings(settings)
+
+        val auth = CookieParser.generateDynamicAuthHeader(CookieParser.parse(cookie))
+        extension.setLoginUser(createFallbackUsers(cookie, auth).first())
+
+        val track = extension.loadTrack(Track(videoId, ""), false)
+        val videoStreamable = track.streamables.firstOrNull { it.extras["type"] == "video" }
+            ?: error("No video streamable returned for $videoId")
+        val media = extension.loadStreamableMedia(videoStreamable, false)
+
+        assertTrue("Expected a server media result", media is Streamable.Media.Server)
+        val server = media as Streamable.Media.Server
+        val httpSources = server.sources.filterIsInstance<Streamable.Source.Http>()
+        val hasVideo = httpSources.any { it.isVideo }
+        val hasAudio = httpSources.any { !it.isVideo }
+        val isHls = httpSources.any { it.type == Streamable.SourceType.HLS }
+        assertTrue(
+            "Expected merged video+audio or HLS for $videoId, got merged=${server.merged}, " +
+                "sources=${httpSources.map { "video=${it.isVideo} quality=${it.quality}" }}",
+            (server.merged && hasVideo && hasAudio) || (httpSources.size == 1 && isHls)
+        )
+        println("AuthenticatedPlaybackTest: video $videoId -> merged=${server.merged}, " +
+            "sources=${httpSources.map { "video=${it.isVideo} quality=${it.quality}" }}")
+
+        val videoSource = httpSources.first { it.isVideo }
+        // HLS quality-sorting writes a local temp-file URI in JVM tests; only
+        // http(s) URLs can be probed with OkHttp here.
+        if (videoSource.request.url.startsWith("http")) {
+            val builder = okhttp3.Request.Builder().url(videoSource.request.url)
+            videoSource.request.headers.forEach { (key, value) -> builder.header(key, value) }
+            val code = OkHttpClient.Builder()
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .callTimeout(15, TimeUnit.SECONDS)
+                .build()
+                .newCall(builder.build())
+                .execute()
+                .use { it.code }
+            assertTrue("Expected a playable video URL, got HTTP $code", code in 200..399)
+        }
+    }
+
     private suspend fun assertTrackPlays(
         cookie: String,
         videoId: String,
