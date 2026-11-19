@@ -57,9 +57,31 @@ enum class SpoofClient(
     ),
     TV(
         id = "tv",
-        displayName = "Android TV / Smart TV",
+        displayName = "Android TV / Smart TV (legacy)",
         clientName = "TVHTML5",
         clientVersion = "7.20230405.08.01",
+        userAgent = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 TV Safari/537.36",
+        platform = "TV",
+        origin = "https://www.youtube.com",
+        clientNumber = "85",
+        isWebClient = true
+    ),
+    TV_DOWNGRADED(
+        id = "tv_downgraded",
+        displayName = "Android TV / Smart TV (5.20260707)",
+        clientName = "TVHTML5",
+        clientVersion = "5.20260707",
+        userAgent = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 TV Safari/537.36",
+        platform = "TV",
+        origin = "https://www.youtube.com",
+        clientNumber = "85",
+        isWebClient = true
+    ),
+    TV_CURRENT(
+        id = "tv_current",
+        displayName = "Android TV / Smart TV (7.20260707)",
+        clientName = "TVHTML5",
+        clientVersion = "7.20260707.07.00",
         userAgent = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/5.0 TV Safari/537.36",
         platform = "TV",
         origin = "https://www.youtube.com",
@@ -73,7 +95,9 @@ enum class SpoofClient(
         clientVersion = "2.20240901.00.00",
         userAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
         platform = "MOBILE",
-        origin = "https://m.youtube.com",
+        // The player endpoint is www.youtube.com; sending the m.youtube.com
+        // origin makes YouTube answer HTTP 400 ("Origin doesn't match Host").
+        origin = "https://www.youtube.com",
         clientNumber = "2",
         isWebClient = true
     ),
@@ -86,6 +110,17 @@ enum class SpoofClient(
         platform = "DESKTOP",
         origin = "https://music.youtube.com",
         clientNumber = "67",
+        isWebClient = true
+    ),
+    WEB_CREATOR(
+        id = "web_creator",
+        displayName = "YouTube Web Creator",
+        clientName = "WEB_CREATOR",
+        clientVersion = "1.20261001.00.00",
+        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+        platform = "DESKTOP",
+        origin = "https://www.youtube.com",
+        clientNumber = "62",
         isWebClient = true
     );
 

@@ -29,6 +29,8 @@ import dev.brahmkshatriya.echo.extension.providers.social.FollowManager
 import dev.brahmkshatriya.echo.extension.providers.social.LikeManager
 import dev.brahmkshatriya.echo.extension.providers.social.ShareManager
 import dev.brahmkshatriya.echo.extension.search.YouTubeSearchService
+import dev.brahmkshatriya.echo.extension.streaming.PoTokenProvider
+import dev.brahmkshatriya.echo.extension.streaming.SettingsPoTokenProvider
 import dev.brahmkshatriya.echo.extension.streaming.StreamMediaCache
 import dev.brahmkshatriya.echo.extension.streaming.YouTubeStreamResolver
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
@@ -64,9 +66,18 @@ class ExtensionComponents(
         get() = settings.getBoolean("preload_stream") ?: true
 
     //Endpoints (API Communication)
-    
+
     val visitorEndpoint = EchoVisitorEndpoint(api)
-    val videoEndpoint = EchoVideoEndpoint(api)
+
+    /**
+     * The video endpoint consults the PO Token provider so web-client **player
+     * requests** carry `serviceIntegrityDimensions.poToken` (video-bound) — the
+     * restricted-song unlock used by Metrolist/ArchiveTune/LastWave. The lambda
+     * resolves lazily, so construction order does not matter.
+     */
+    val videoEndpoint = EchoVideoEndpoint(api, playerPoToken = { videoId ->
+        poTokenProvider.token(videoId)
+    })
     val songFeedEndpoint = EchoSongFeedEndpoint(api)
     val artistEndpoint = EchoArtistEndpoint(api)
     val artistMoreEndpoint = EchoArtistMoreEndpoint(api)
@@ -94,8 +105,26 @@ class ExtensionComponents(
 
     val streamCache = StreamMediaCache()
 
+    /**
+     * `off` unless the user configures an external minter. The provider reads the
+     * settings on every call, so toggling it does not require new components.
+     */
+    val poTokenProvider: PoTokenProvider by lazy {
+        SettingsPoTokenProvider(settings)
+    }
+
     val streamResolver by lazy {
-        YouTubeStreamResolver(api, settings, videoEndpoint, visitorEndpoint, streamCache)
+        YouTubeStreamResolver(
+            api = api,
+            settings = settings,
+            videoEndpoint = videoEndpoint,
+            visitorEndpoint = visitorEndpoint,
+            cache = streamCache,
+            poTokenProvider = poTokenProvider,
+            sessionKey = {
+                "${api.visitor_id ?: "anon"}|${authManager.getCurrentUserId() ?: "anon"}"
+            }
+        )
     }
 
     /** Long-lived scope for speculative work (stream preloading, solver warm-up). */

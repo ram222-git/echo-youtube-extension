@@ -47,6 +47,18 @@ internal object StreamHttpClient {
             .build()
     }
 
+    /**
+     * Talks to an optional local PO Token provider. Short timeouts: a missing
+     * provider must degrade to the token-free clients, never stall playback.
+     */
+    val token: OkHttpClient by lazy {
+        player.newBuilder()
+            .connectTimeout(2, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS)
+            .build()
+    }
+
     /** Used by the signature solver, which downloads base.js once per player version. */
     val solver: OkHttpClient by lazy {
         player.newBuilder()

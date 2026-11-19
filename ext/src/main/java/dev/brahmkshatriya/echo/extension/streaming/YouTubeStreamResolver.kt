@@ -1,4 +1,4 @@
-package dev.brahmkshatriya.echo.extension.streaming
+﻿package dev.brahmkshatriya.echo.extension.streaming
 
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.Streamable
@@ -8,6 +8,7 @@ import dev.brahmkshatriya.echo.extension.YtmKtVideoFormatsEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.EchoVideoEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.EchoVisitorEndpoint
 import dev.brahmkshatriya.echo.extension.endpoints.YoutubeFormatResponse
+import dev.brahmkshatriya.echo.extension.utils.stringSetting
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -24,7 +25,10 @@ class YouTubeStreamResolver(
     private val settings: Settings,
     private val videoEndpoint: EchoVideoEndpoint,
     private val visitorEndpoint: EchoVisitorEndpoint,
-    private val cache: StreamMediaCache = StreamMediaCache()
+    private val cache: StreamMediaCache = StreamMediaCache(),
+    private val poTokenProvider: PoTokenProvider = OffPoTokenProvider,
+    /** Identity of the current session, used to keep cached media per account. */
+    private val sessionKey: () -> String = { "" }
 ) {
     companion object {
         private val HEIGHT_REGEX = Regex("(\\d+)p")
@@ -67,7 +71,6 @@ class YouTubeStreamResolver(
             .build()
         return probeClient.newCall(req).execute().use { resp ->
             if (resp.code == 403) {
-                println("YouTubeStreamResolver: probe got HTTP 403 for ${url.take(60)}...")
                 false
             } else {
                 true
@@ -222,7 +225,7 @@ class YouTubeStreamResolver(
                 headers["Cookie"] = cookie
             }
         }
-        println("createStreamingRequest: isGoogleVideo=$isGoogleVideo, headers=${headers.keys}, url=${url.take(80)}...")
+        println("createStreamingRequest: isGoogleVideo=$isGoogleVideo, headers=${headers.keys}, url=${url.redactedStreamUrl()}")
         return NetworkRequest(
             url = url,
             headers = headers
@@ -230,7 +233,24 @@ class YouTubeStreamResolver(
     }
 
     private fun spoofSetting(): String =
-        settings.getString("spoof_stream_client")?.trim()?.lowercase() ?: "auto"
+        settings.stringSetting("spoof_stream_client", valid = SpoofClient.entries.map { it.id }.toSet() + "auto")
+            ?.trim()?.lowercase() ?: "auto"
+
+    /**
+     * TVHTML5 answers `UNPLAYABLE / "The page needs to be reloaded."` when it is
+     * called without a session, so the lane is only worth a request when a cookie
+     * is available. visionOS remains the anonymous fast path.
+     */
+    private fun hasSessionCookie(): Boolean =
+        !RealNewPipeVideoFormatsEndpoint.globalCookie.isNullOrBlank() ||
+            !api.user_auth_state?.headers?.get("cookie").isNullOrBlank()
+
+    private fun sessionSuffix(): String {
+        // Makes the effective provider state unambiguous in every playback log:
+        // a missing WEB_REMIX lane is always explained by this line.
+        println("YouTubeStreamResolver: ${(poTokenProvider as? SettingsPoTokenProvider)?.describeState() ?: "potoken: kind=${poTokenProvider.kind}"}")
+        return "${poTokenProvider.kind}:${sessionKey()}"
+    }
 
     suspend fun resolveStreamable(videoId: String): Streamable.Media {
         return resolveStreamable(null, videoId)
@@ -242,7 +262,7 @@ class YouTubeStreamResolver(
     ): Streamable.Media {
         val type = streamable?.extras?.get("type") ?: "audio"
         val height = streamable?.extras?.get("height") ?: "0"
-        val key = "$videoId|$type|$height|${spoofSetting()}"
+        val key = "$videoId|$type|$height|${spoofSetting()}|${sessionSuffix()}"
         println("Loading streamable media for video ID: $videoId (type=$type)")
         return try {
             cache.getOrResolve(key) { resolveStreamableInternal(streamable, videoId) }
@@ -263,7 +283,7 @@ class YouTubeStreamResolver(
         val targetHeight = streamable?.extras?.get("height")?.toIntOrNull()
             ?: streamable?.quality?.takeIf { it > 0 }
             ?: 720
-        val key = "$videoId|background|$targetHeight|${spoofSetting()}"
+        val key = "$videoId|background|$targetHeight|${spoofSetting()}|${sessionSuffix()}"
         return try {
             cache.getOrResolve(key) { resolveBackgroundInternal(videoId, targetHeight) }
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -355,7 +375,7 @@ class YouTubeStreamResolver(
 
         // 1. If user selected a specific spoof client (visionOS, iOS, TV, MWEB, WEB_REMIX), try it first!
         if (specificClient != null) {
-            val spoofResult = trySpoofedExtractor(videoId, specificClient, isVideoRequest, targetHeight)
+            val spoofResult = trySpoofedExtractorWithTokenRetry(videoId, specificClient, isVideoRequest, targetHeight)
             if (spoofResult is ExtractionResult.Success) {
                 println("Successfully loaded streamable using spoofed client: ${specificClient.displayName}")
                 return spoofResult.media
@@ -388,12 +408,18 @@ class YouTubeStreamResolver(
                 errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
             }
 
-            // 3. Fallback: other spoofed clients
-            val videoCascade = listOf(SpoofClient.IOS, SpoofClient.TV)
-                .filter { it != specificClient }
+            // 3. Fallback: token-free TV clients (cookie-compatible), then web
+            //    only when a PO Token provider is configured.
+            val videoCascade = buildList {
+                if (hasSessionCookie()) {
+                    add(SpoofClient.TV_CURRENT)
+                    add(SpoofClient.TV_DOWNGRADED)
+                }
+                if (poTokenProvider.kind != "off") add(SpoofClient.WEB_REMIX)
+            }.filter { it != specificClient }
 
             for (client in videoCascade) {
-                val res = trySpoofedExtractor(videoId, client, isVideoRequest = true, targetHeight)
+                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = true, targetHeight)
                 if (res is ExtractionResult.Success) {
                     println("Successfully loaded video streamable using ${client.displayName}")
                     return res.media
@@ -444,7 +470,31 @@ class YouTubeStreamResolver(
                 errorReasons.add("${SpoofClient.VISIONOS.displayName}: ${visionOsResult.reason}")
             }
 
-            // 2. Fallback: RealNewPipe extracts OPUS (160/70/50 kbps) + AAC (128/48 kbps)
+            // 2. Token-free TV chain. TVHTML5 is the only token-free client that
+            //    is also cookie-compatible, so it is the first lane after visionOS.
+            //    Both versions are tried because YouTube rolls versions gradually;
+            //    each result is probed, so a dead one falls through to the next.
+            val audioCascade = buildList {
+                if (hasSessionCookie()) {
+                    add(SpoofClient.TV_CURRENT)
+                    add(SpoofClient.TV_DOWNGRADED)
+                }
+                // Web clients need a PO Token. Only spend the request when a
+                // provider is configured; otherwise this lane can never succeed.
+                if (poTokenProvider.kind != "off") add(SpoofClient.WEB_REMIX)
+            }.filter { it != specificClient }
+
+            for (client in audioCascade) {
+                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = false, targetHeight)
+                if (res is ExtractionResult.Success) {
+                    println("Successfully loaded audio streamable using ${client.displayName}")
+                    return res.media
+                } else if (res is ExtractionResult.Error) {
+                    errorReasons.add("${client.displayName}: ${res.reason}")
+                }
+            }
+
+            // 3. Fallback: RealNewPipe extracts OPUS (160/70/50 kbps) + AAC (128/48 kbps)
             //    with dynamic JS deciphering.
             println("RealNewPipe extractor for video ID: $videoId (Audio - Opus/AAC)")
             val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = false, targetHeight)
@@ -453,23 +503,6 @@ class YouTubeStreamResolver(
                 return realNewPipeResult.media
             } else if (realNewPipeResult is ExtractionResult.Error) {
                 errorReasons.add("RealNewPipe: ${realNewPipeResult.reason}")
-            }
-
-            // 3. Fallback: other spoofed clients
-            val audioCascade = listOf(
-                SpoofClient.IOS,
-                SpoofClient.WEB_REMIX,
-                SpoofClient.TV
-            ).filter { it != specificClient }
-
-            for (client in audioCascade) {
-                val res = trySpoofedExtractor(videoId, client, isVideoRequest = false, targetHeight)
-                if (res is ExtractionResult.Success) {
-                    println("Successfully loaded audio streamable using ${client.displayName}")
-                    return res.media
-                } else if (res is ExtractionResult.Error) {
-                    errorReasons.add("${client.displayName}: ${res.reason}")
-                }
             }
 
             // 4. Fallback: YtmKt (also supports Opus)
@@ -504,7 +537,23 @@ class YouTubeStreamResolver(
         }
 
         val detailedError = if (errorReasons.isNotEmpty()) {
-            "Failed to resolve streaming URLs for video $videoId:\n" + errorReasons.joinToString("\n")
+            val joined = errorReasons.joinToString("\n")
+            // Signed-in users hitting 403s everywhere with no token source are
+            // almost certainly on an age-restricted/account-locked track that
+            // only web clients can serve; say so instead of a wall of 403s, and
+            // include the provider state so the error dialog itself shows why.
+            val providerState = (poTokenProvider as? SettingsPoTokenProvider)?.describeState()
+                ?: "kind=${poTokenProvider.kind}"
+            val hint = if (poTokenProvider.kind == "off" && hasSessionCookie() &&
+                errorReasons.any { it.contains("403") }
+            ) {
+                "\n\nTip: this track is likely age-restricted or account-locked and needs a PO Token. " +
+                    "Set Settings → PO Token Provider → On-device (or a bgutil server URL), then retry. " +
+                    "[provider state: $providerState]"
+            } else {
+                ""
+            }
+            "Failed to resolve streaming URLs for video $videoId:\n$joined$hint"
         } else {
             "Failed to resolve streaming URLs for video $videoId - all extraction methods failed"
         }
@@ -535,7 +584,7 @@ class YouTubeStreamResolver(
                     val hlsUrl = streams.hlsUrl
                     if (!hlsUrl.isNullOrEmpty()) {
                         val playableHlsUrl = getSortedHlsUrl(videoId, hlsUrl)
-                        println("RealNewPipe: Using sorted HLS master playlist for video ($playableHlsUrl)")
+                        println("RealNewPipe: Using sorted HLS master playlist for video (${playableHlsUrl.redactedStreamUrl()})")
                         return ExtractionResult.Success(
                             Streamable.Media.Server(listOf(createHlsSource(playableHlsUrl)), merged = false)
                         )
@@ -721,12 +770,36 @@ class YouTubeStreamResolver(
                 videoResponse = videoResponse,
                 isVideoRequest = isVideoRequest,
                 targetHeight = targetHeight,
-                isMusicOrigin = client == SpoofClient.WEB_REMIX
+                isMusicOrigin = client == SpoofClient.WEB_REMIX,
+                client = client
             )
         } catch (e: Exception) {
             println("SpoofClientExtractor (${client.displayName}) Exception: ${e.message}")
             ExtractionResult.Error(e.message ?: "${client.displayName} extraction failed")
         }
+    }
+
+    /**
+     * A web-client lane can fail its health check when the token it was given was
+     * minted for an earlier request (expired, or invalidated by a 403). Re-mint
+     * once and retry the lane before falling through to the next extractor.
+     */
+    private suspend fun trySpoofedExtractorWithTokenRetry(
+        videoId: String,
+        client: SpoofClient,
+        isVideoRequest: Boolean,
+        targetHeight: Int? = null
+    ): ExtractionResult {
+        val first = trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight)
+        if (first is ExtractionResult.Success) return first
+        val failedReason = (first as? ExtractionResult.Error)?.reason.orEmpty()
+        val retryable = client.requiresStreamToken &&
+            poTokenProvider.kind != "off" &&
+            failedReason.contains("403")
+        if (!retryable) return first
+        println("YouTubeStreamResolver: ${client.displayName} rejected its stream URL; retrying with a fresh PO Token")
+        poTokenProvider.invalidate()
+        return trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight)
     }
 
     private suspend fun tryYouTubeMusicApi(
@@ -757,10 +830,22 @@ class YouTubeStreamResolver(
         targetHeight: Int? = null
     ): ExtractionResult {
         return try {
+            // A PO Token is bound to the visitor used for the player request, so
+            // the binding must exist before the restricted request is made.
+            if (api.visitor_id == null) {
+                runCatching { api.visitor_id = visitorEndpoint.getVisitorId() }
+            }
             println("RestrictedVideoExtractor: Trying web_creator / restricted player for $videoId")
-            val videoResponse = videoEndpoint.getRestrictedVideo(videoId)
+            val result = videoEndpoint.getRestrictedVideo(videoId)
                 ?: return ExtractionResult.Error("Restricted player returned no response")
-            extractMediaFromFormatResponse(videoId, videoResponse, isVideoRequest, targetHeight, isMusicOrigin = false)
+            extractMediaFromFormatResponse(
+                videoId = videoId,
+                videoResponse = result.response,
+                isVideoRequest = isVideoRequest,
+                targetHeight = targetHeight,
+                isMusicOrigin = false,
+                client = result.client
+            )
         } catch (e: Exception) {
             println("RestrictedVideoExtractor Exception: ${e.message}")
             ExtractionResult.Error(e.message ?: "Restricted extraction failed")
@@ -772,7 +857,8 @@ class YouTubeStreamResolver(
         videoResponse: YoutubeFormatResponse,
         isVideoRequest: Boolean,
         targetHeight: Int? = null,
-        isMusicOrigin: Boolean = false
+        isMusicOrigin: Boolean = false,
+        client: SpoofClient? = null
     ): ExtractionResult {
         val streamingData = videoResponse.streamingData
             ?: return ExtractionResult.Error("Player response contains no streaming data")
@@ -784,7 +870,7 @@ class YouTubeStreamResolver(
         val hlsUrl = streamingData.hlsManifestUrl ?: streamingData.dashManifestUrl
         if (isVideoRequest && !hlsUrl.isNullOrEmpty()) {
             val playableHlsUrl = getSortedHlsUrl(videoId, hlsUrl)
-            println("YouTubeStreamResolver: Using sorted HLS master playlist for video ($playableHlsUrl)")
+            println("YouTubeStreamResolver: Using sorted HLS master playlist for video (${playableHlsUrl.redactedStreamUrl()})")
             return ExtractionResult.Success(
                 Streamable.Media.Server(listOf(createHlsSource(playableHlsUrl, isMusicOrigin)), merged = false)
             )
@@ -837,6 +923,27 @@ class YouTubeStreamResolver(
             println("  itag=${it.itag}, height=${it.height}p, isVideo=${it.isVideo}, isAudio=${it.isAudio}, bitrate=${it.bitrate / 1000}k, mime=${it.mimeType}")
         }
 
+        // Web clients serve URLs that the CDN rejects until a PO Token bound to
+        // this visitor is appended. Token-free clients (visionOS, TVHTML5) skip
+        // this entirely; skipping the lane is better than probing a URL that
+        // cannot succeed.
+        // Web clients can carry a PO Token. It is optional: the CDN also serves a
+        // correctly signed URL without one, and failing the lane because no
+        // provider is configured would be worse than playing without a token.
+        val tokenCapable = client?.requiresStreamToken == true
+        val token = if (tokenCapable) poTokenProvider.token(videoId) else null
+        if (tokenCapable) {
+            println(
+                if (token.isNullOrBlank()) {
+                    "YouTubeStreamResolver: no PO Token available for ${client?.displayName}; playing without one"
+                } else {
+                    "YouTubeStreamResolver: PO Token for ${client?.displayName}: binding=$videoId, " +
+                        "token=${token.length} chars"
+                }
+            )
+        }
+        fun withToken(url: String): String = url.withPoToken(token)
+
         if (isVideoRequest) {
             val videos = resolved.filter { it.isVideo && (it.height ?: 0L) > 0 }
             val audios = resolved.filter { it.isAudio }
@@ -859,7 +966,7 @@ class YouTubeStreamResolver(
 
                 val h = selectedVideo.height!!.toInt()
                 val videoSource = Streamable.Source.Http(
-                    request = createStreamingRequest(selectedVideo.url, isMusicOrigin = isMusicOrigin),
+                    request = createStreamingRequest(withToken(selectedVideo.url), isMusicOrigin = isMusicOrigin),
                     type = Streamable.SourceType.Progressive,
                     quality = h,
                     title = "${h}p",
@@ -867,7 +974,7 @@ class YouTubeStreamResolver(
                 )
                 val audioBitrate = normalizeAudioBitrate(bestAudio.itag, bestAudio.bitrate)
                 val audioSource = Streamable.Source.Http(
-                    request = createStreamingRequest(bestAudio.url, isMusicOrigin = isMusicOrigin),
+                    request = createStreamingRequest(withToken(bestAudio.url), isMusicOrigin = isMusicOrigin),
                     type = Streamable.SourceType.Progressive,
                     quality = audioBitrate,
                     title = null,
@@ -875,7 +982,8 @@ class YouTubeStreamResolver(
                 )
                 println("YouTubeStreamResolver: Video request (targetHeight=$targetHeight). Selected: ${videoSource.title} (itag=${selectedVideo.itag}), audio: itag=${bestAudio.itag} (${audioBitrate}kbps). Returning merged video+audio.")
                 // One parallel check for the two streams that will actually play.
-                if (!probeAllPlayable(selectedVideo.url, bestAudio.url)) {
+                if (!probeAllPlayable(withToken(selectedVideo.url), withToken(bestAudio.url))) {
+                    if (!token.isNullOrBlank()) poTokenProvider.invalidate()
                     println("YouTubeStreamResolver: Extracted video/audio stream URL rejected with HTTP 403.")
                     return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
                 }
@@ -884,7 +992,7 @@ class YouTubeStreamResolver(
                 val sources = distinctVideoFormats.map { format ->
                     val h = format.height!!.toInt()
                     Streamable.Source.Http(
-                        request = createStreamingRequest(format.url, isMusicOrigin = isMusicOrigin),
+                        request = createStreamingRequest(withToken(format.url), isMusicOrigin = isMusicOrigin),
                         type = Streamable.SourceType.Progressive,
                         quality = h,
                         title = "${h}p",
@@ -893,6 +1001,7 @@ class YouTubeStreamResolver(
                 }
                 // Quality list is ordered best-first; verify only the one that will play.
                 if (!probePlayable(sources.first().request.url)) {
+                    if (!token.isNullOrBlank()) poTokenProvider.invalidate()
                     println("YouTubeStreamResolver: Top video source rejected with HTTP 403, rejecting extractor result")
                     return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
                 }
@@ -902,11 +1011,11 @@ class YouTubeStreamResolver(
 
             // Fallback: Muxed formats if separate streams unavailable and playable
             val muxedFormats = resolved.filter { (it.itag == 18L || it.itag == 22L) || (it.isVideo && it.mimeType.contains("mp4a")) }
-            val muxed = muxedFormats.firstOrNull { probePlayable(it.url) }
+            val muxed = muxedFormats.firstOrNull { probePlayable(withToken(it.url)) }
             if (muxed != null) {
                 val h = muxed.height?.toInt() ?: if (muxed.itag == 18L) 360 else 720
                 val muxedSource = Streamable.Source.Http(
-                    request = createStreamingRequest(muxed.url, isMusicOrigin = isMusicOrigin),
+                    request = createStreamingRequest(withToken(muxed.url), isMusicOrigin = isMusicOrigin),
                     type = Streamable.SourceType.Progressive,
                     quality = h,
                     title = "${h}p",
@@ -934,7 +1043,7 @@ class YouTubeStreamResolver(
             val kbps = normalizeAudioBitrate(format.itag, format.bitrate)
             sources.add(
                 Streamable.Source.Http(
-                    request = createStreamingRequest(format.url, isMusicOrigin = isMusicOrigin),
+                    request = createStreamingRequest(withToken(format.url), isMusicOrigin = isMusicOrigin),
                     type = Streamable.SourceType.Progressive,
                     quality = kbps,
                     title = null,
@@ -947,7 +1056,7 @@ class YouTubeStreamResolver(
         if (muxedAudio != null && sources.none { it.quality == 128 }) {
             sources.add(
                 Streamable.Source.Http(
-                    request = createStreamingRequest(muxedAudio.url, isMusicOrigin = isMusicOrigin),
+                    request = createStreamingRequest(withToken(muxedAudio.url), isMusicOrigin = isMusicOrigin),
                     type = Streamable.SourceType.Progressive,
                     quality = 128,
                     title = null,
@@ -964,7 +1073,17 @@ class YouTubeStreamResolver(
         // whole client response is unusable (all URLs come from the same client), so
         // let the cascade move to the next extractor instead of caching a bad result.
         if (!probePlayable(sources.first().request.url)) {
+            if (!token.isNullOrBlank()) poTokenProvider.invalidate()
             println("YouTubeStreamResolver: Top audio source rejected with HTTP 403, rejecting extractor result")
+            // A signed-in user hitting this on a web client without a token means
+            // YouTube served an age/account-restricted track: report the actual
+            // cause so it is not mistaken for a broken stream or a bad cookie.
+            if (client?.requiresStreamToken == true && token.isNullOrBlank()) {
+                return ExtractionResult.Error(
+                    "This track is age-restricted or account-locked and needs a PO Token. " +
+                        "Set Settings → PO Token Provider → On-device (no server needed), or a bgutil server URL."
+                )
+            }
             return ExtractionResult.Error("Audio stream failed health check (HTTP 403 Forbidden)")
         }
 

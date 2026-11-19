@@ -40,6 +40,16 @@ object YouTubeSignatureDeobfuscator {
     @Volatile
     private var playerJsUrl: String? = null
 
+    /** The `base.js` the currently evaluated Rhino scope was built from. */
+    @Volatile
+    private var loadedPlayerJsUrl: String? = null
+
+    @Volatile
+    private var discoveredPlayerJsUrl: String? = null
+
+    @Volatile
+    private var discoveredPlayerJsAt = 0L
+
     private var rhinoScope: Scriptable? = null
     private var solveBothFunction: Function? = null
 
@@ -53,9 +63,18 @@ object YouTubeSignatureDeobfuscator {
     private val solvedCache = ConcurrentHashMap<String, DecipherResult>()
 
     private const val INIT_RETRY_MS = 10 * 60 * 1000L
+    private const val PLAYER_JS_TTL_MS = 6 * 60 * 60 * 1000L
     private const val MAX_SOLVED_CACHE = 256
+    private const val PLAYER_JS_ORIGIN = "https://www.youtube.com"
+    private const val DESKTOP_USER_AGENT =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
     private const val FALLBACK_BASE_JS = "https://www.youtube.com/s/player/57bae81f/player_ias.vflset/en_GB/base.js"
+
+    private val PLAYER_ID_PATTERN = Pattern.compile("/s/player/([A-Za-z0-9_-]{8,})/")
+    private val JS_URL_PATTERN = Pattern.compile(
+        "\"PLAYER_JS_URL\"\\s*:\\s*\"([^\"]+)\"|\"jsUrl\"\\s*:\\s*\"([^\"]+)\""
+    )
 
     private val ALR_PATTERN = Pattern.compile(
         "([a-zA-Z0-9_$]+)=function\\([a-zA-Z0-9_$]+,[a-zA-Z0-9_$]+,[a-zA-Z0-9_$]+\\)\\{[^}]*?new [a-zA-Z0-9_$.]+\\([^,]+,!0\\);[a-zA-Z0-9_$]+\\.set\\(\"alr\",\\s*\"yes\"\\);"
@@ -65,17 +84,83 @@ object YouTubeSignatureDeobfuscator {
     /**
      * Tells the solver which `base.js` the current player response was built with.
      * Passing the real one avoids deciphering against a fixed, stale player hash.
+     *
+     * A `null` [url] is ignored on purpose: some clients (notably `WEB_REMIX`) no
+     * longer return an `assets.js`, and that must not erase a player URL that was
+     * already resolved or discovered for this session.
      */
     fun setPlayerJsUrl(url: String?) {
-        val normalized = when {
-            url.isNullOrBlank() -> null
-            url.startsWith("//") -> "https:$url"
-            url.startsWith("/") -> "https://www.youtube.com$url"
-            else -> url
+        val normalized = normalizePlayerJsUrl(url) ?: return
+        if (normalized == playerJsUrl) return
+        playerJsUrl = normalized
+        synchronized(lock) {
+            if (loadedPlayerJsUrl != null && loadedPlayerJsUrl != normalized) {
+                resetSolverLocked()
+            }
         }
-        if (!normalized.isNullOrBlank() && normalized != playerJsUrl) {
-            playerJsUrl = normalized
+    }
+
+    /**
+     * Normalises any player URL the API hands us to the current `player_ias`
+     * variant of the same player build.
+     *
+     * All variants of one build (`player_es6`, `player_es6_tcc`, `player_ias`, ...)
+     * share the same signature algorithm, but the regex that locates the
+     * decipher function is only stable on `player_ias`. yt-dlp makes the same
+     * choice, and the watch page now advertises `player_es6` instead.
+     */
+    private fun normalizePlayerJsUrl(url: String?): String? {
+        val raw = url?.replace("\\/", "/")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val absolute = when {
+            raw.startsWith("//") -> "https:$raw"
+            raw.startsWith("/") -> "$PLAYER_JS_ORIGIN$raw"
+            else -> raw
         }
+        if (absolute.contains("tv-player")) return absolute
+        val matcher = PLAYER_ID_PATTERN.matcher(absolute)
+        if (!matcher.find()) return absolute
+        return "$PLAYER_JS_ORIGIN/s/player/${matcher.group(1)}/player_ias.vflset/en_US/base.js"
+    }
+
+    /**
+     * Resolves the player build currently served by YouTube. The player response
+     * no longer carries `assets.js`, so the build hash is read from the public
+     * homepage once and cached. Without this the solver would keep deciphering
+     * against [FALLBACK_BASE_JS] and produce signatures the CDN rejects.
+     */
+    private fun resolveCurrentPlayerJsUrl(): String? {
+        val cached = discoveredPlayerJsUrl
+        if (cached != null && System.currentTimeMillis() - discoveredPlayerJsAt < PLAYER_JS_TTL_MS) {
+            return cached
+        }
+        return runCatching {
+            val request = Request.Builder()
+                .url("$PLAYER_JS_ORIGIN/")
+                .header("User-Agent", DESKTOP_USER_AGENT)
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .build()
+            val html = client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) error("Failed to download the YouTube homepage: HTTP ${response.code}")
+                response.body?.string() ?: error("Empty YouTube homepage")
+            }
+            val matcher = JS_URL_PATTERN.matcher(html)
+            val found = if (matcher.find()) matcher.group(1) ?: matcher.group(2) else null
+            normalizePlayerJsUrl(found)?.also { resolved ->
+                discoveredPlayerJsUrl = resolved
+                discoveredPlayerJsAt = System.currentTimeMillis()
+                println("YouTubeSignatureDeobfuscator: Discovered current player JS: $resolved")
+            }
+        }.getOrNull()
+    }
+
+    private fun resetSolverLocked() {
+        isInitialized = false
+        rhinoScope = null
+        solveBothFunction = null
+        loadedPlayerJsUrl = null
+        solvedCache.clear()
+        initFailedAt = 0L
+        println("YouTubeSignatureDeobfuscator: Player JS changed, solver will be rebuilt")
     }
 
     fun isReady(): Boolean = isInitialized
@@ -102,18 +187,33 @@ object YouTubeSignatureDeobfuscator {
     private fun isRateLimited(): Boolean =
         initFailedAt != 0L && System.currentTimeMillis() - initFailedAt < INIT_RETRY_MS
 
-    private fun fetchBaseJsCode(): String {
-        val url = playerJsUrl ?: FALLBACK_BASE_JS
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            .build()
-        return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                error("Failed to download YouTube base.js: HTTP ${response.code}")
+    private data class PlayerJsSource(val url: String, val code: String)
+
+    private fun fetchBaseJsCode(): PlayerJsSource {
+        val candidates = listOfNotNull(
+            playerJsUrl,
+            resolveCurrentPlayerJsUrl(),
+            FALLBACK_BASE_JS
+        ).distinct()
+
+        var lastError: Throwable? = null
+        for (url in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", DESKTOP_USER_AGENT)
+                    .build()
+                val code = client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("Failed to download YouTube base.js: HTTP ${response.code}")
+                    response.body?.string() ?: error("Failed to download YouTube base.js")
+                }
+                return PlayerJsSource(url, code)
+            } catch (t: Throwable) {
+                lastError = t
+                println("YouTubeSignatureDeobfuscator: Could not load $url (${t.message})")
             }
-            response.body?.string() ?: error("Failed to download YouTube base.js")
         }
+        throw lastError ?: IllegalStateException("No YouTube base.js source available")
     }
 
     private fun initSolver() {
@@ -125,7 +225,8 @@ object YouTubeSignatureDeobfuscator {
             if (isInitialized) return
             try {
                 println("YouTubeSignatureDeobfuscator: Initializing signature solver...")
-                val baseJs = fetchBaseJsCode()
+                val playerJs = fetchBaseJsCode()
+                val baseJs = playerJs.code
 
                 val matcher = ALR_PATTERN.matcher(baseJs)
                 if (!matcher.find()) {
@@ -138,15 +239,6 @@ object YouTubeSignatureDeobfuscator {
                     globalThis._solveBoth = function(sig, n) {
                         var u = $alrFn("https://youtube.com/watch?v=yt-dlp-wins", "s", sig ? encodeURIComponent(sig) : undefined);
                         if (n) u.set("n", n);
-                        var proto = Object.getPrototypeOf(u);
-                        var keys = Object.keys(proto).concat(Object.getOwnPropertyNames(proto));
-                        for (var i = 0; i < keys.length; i++) {
-                            var key = keys[i];
-                            if (!["constructor", "set", "get", "clone"].includes(key)) {
-                                u[key]();
-                                break;
-                            }
-                        }
                         var s = u.get("s");
                         return {
                             sig: s ? decodeURIComponent(s) : null,
@@ -197,6 +289,7 @@ object YouTubeSignatureDeobfuscator {
                         ?: error("Could not find _solveBoth in scope")
                     rhinoScope = scope
                     solveBothFunction = fn
+                    loadedPlayerJsUrl = playerJs.url
                     initFailedAt = 0
                     isInitialized = true
                     println("YouTubeSignatureDeobfuscator: Solver initialized successfully!")

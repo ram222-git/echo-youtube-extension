@@ -46,9 +46,13 @@ import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingList
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
+import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.providers.ExtensionComponents
+import dev.brahmkshatriya.echo.extension.streaming.SettingsPoTokenProvider
+import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
+import dev.brahmkshatriya.echo.extension.utils.stringSetting
 import dev.toastbits.ytmkt.endpoint.SearchType
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiAuthenticationState
@@ -107,7 +111,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                 "Auto (Smart Cascade - Recommended)",
                 "visionOS (Works with current YouTube URLs)",
                 "iOS (High quality audio & HLS)",
-                "Android TV / Smart TV",
+                "Android TV / Smart TV (7.20260707)",
+                "Android TV / Smart TV (5.20260707)",
+                "Android TV / Smart TV (legacy)",
                 "Mobile Web (MWEB)",
                 "YouTube Music Web (WEB_REMIX)"
             ),
@@ -115,22 +121,67 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                 "auto",
                 "visionos",
                 "ios",
+                "tv_current",
+                "tv_downgraded",
                 "tv",
                 "mweb",
                 "web_remix"
             ),
             defaultEntryIndex = 0
+        ),
+        SettingList(
+            title = "PO Token Provider",
+            key = "potoken_mode",
+            summary = "Age-restricted and account-locked tracks are only served to web clients, whose stream URLs need a PO Token. On-device generates the token on this phone (no server needed); External uses a bgutil-compatible server URL below. Off keeps the token-free clients only.",
+            entryTitles = listOf(
+                "On-device (this phone, recommended)",
+                "Off (token-free clients only)",
+                "External server (bgutil-compatible)"
+            ),
+            entryValues = listOf(
+                "android",
+                "off",
+                "external"
+            ),
+            defaultEntryIndex = 0
+        ),
+        SettingTextInput(
+            title = "PO Token Server URL",
+            key = "potoken_url",
+            summary = "Base URL of your provider, e.g. http://192.168.1.10:4416 (the phone cannot reach 127.0.0.1, use your computer's LAN IP). Entering a URL is enough to enable tokens. Tokens are bound to the video being played, cached in memory only, and never stored.",
+            defaultValue = ""
         )
     )
 
     private lateinit var settings: Settings
     override fun setSettings(settings: Settings) {
         this.settings = settings
+        // Heal list keys that an older experimental build stored as StringSet
+        // (SettingMultipleChoice); a stale Set<String> crashes every playback and
+        // the host app's own settings screen until it is rewritten as a String.
+        // Must run before the settings UI is ever rendered.
+        runCatching {
+            settings.stringSetting("spoof_stream_client", valid = SpoofClient.entries.map { it.id }.toSet() + "auto")
+            settings.stringSetting(
+                SettingsPoTokenProvider.KEY_MODE,
+                valid = SettingsPoTokenProvider.VALID_MODES
+            )
+            settings.stringSetting(SettingsPoTokenProvider.KEY_URL)
+        }
         components = ExtensionComponents(api, settings, json)
     }
 
     override suspend fun onSettingsChanged(settings: Settings, key: String?) {
         this.settings = settings
+        // A provider or URL change invalidates every cached token and media URL.
+        if (key == null || key == "potoken_mode" || key == "potoken_url") {
+            if (::components.isInitialized) {
+                // Mode changes may switch the minting mechanism: drop the WebView engine too.
+                runCatching { (components.poTokenProvider as? SettingsPoTokenProvider)?.invalidateAll() }
+                runCatching { components.poTokenProvider.invalidate() }
+                runCatching { components.streamCache.clear() }
+            }
+        }
     }
 
     private fun syncActiveCookie(cookie: String) {
@@ -611,6 +662,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
             syncActiveCookie(activeCookie)
         }
+        // Never reuse cached media or tokens across accounts.
+        runCatching { components.poTokenProvider.invalidate() }
+        runCatching { components.streamCache.clear() }
         runCatching { components.likeManager.clearCache() }
         api.visitor_id = runCatching { kotlinx.coroutines.runBlocking { components.visitorEndpoint.getVisitorId() } }.getOrNull()
     }

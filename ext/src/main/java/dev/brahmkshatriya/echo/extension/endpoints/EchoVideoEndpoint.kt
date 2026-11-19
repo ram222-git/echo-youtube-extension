@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.extension.endpoints
 import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.streaming.StreamHttpClient
+import dev.brahmkshatriya.echo.extension.streaming.requiresStreamToken
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
@@ -21,7 +22,19 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
-class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
+/**
+ * @param playerPoToken supplies the video-bound PO Token for web-client player
+ *   requests; `null` means token-free (identical to the historical behaviour).
+ */
+class EchoVideoEndpoint(
+    override val api: YoutubeiApi,
+    private val playerPoToken: suspend (videoId: String) -> String? = { null }
+) : ApiEndpoint() {
+
+    companion object {
+        /** Used when the live signature timestamp cannot be parsed from the player JS. */
+        const val FALLBACK_SIGNATURE_TIMESTAMP = 20773
+    }
 
     private suspend fun request(
         context: JsonObject,
@@ -73,6 +86,34 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
     private val okHttpClient get() = StreamHttpClient.player
 
+    /**
+     * Supplies the video-bound PO Token for web-client **player requests**
+     * (`serviceIntegrityDimensions.poToken`) — the same video-bound token also
+     * lands on the stream URLs. This is what makes age-restricted/account-locked
+     * playback succeed for signed-in users (validated in production by
+     * Metrolist/ArchiveTune/LastWave; researched in
+     * `docs/PO_TOKEN_SERVERLESS_RESEARCH.md`). Best-effort: `null` simply means
+     * the request is sent token-free, exactly as before.
+     */
+    private suspend fun playerToken(videoId: String): String? =
+        runCatching { playerPoToken(videoId) }
+            .onFailure {
+                println("EchoVideoEndpoint: player token lookup failed (${it.javaClass.simpleName}: ${it.message})")
+            }
+            .getOrNull()
+
+    /**
+     * Live signature timestamp from the current player JS (bundled NewPipe
+     * Extractor caches it per player version). A stale hardcoded value can cause
+     * `400 Precondition check failed` on web player requests.
+     */
+    private fun signatureTimestamp(videoId: String): Int = runCatching {
+        org.schabi.newpipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager
+            .getSignatureTimestamp(videoId)
+    }.onFailure {
+        println("EchoVideoEndpoint: live signatureTimestamp unavailable (${it.javaClass.simpleName}); using fallback")
+    }.getOrNull() ?: FALLBACK_SIGNATURE_TIMESTAMP
+
     suspend fun getSpoofedVideo(
         id: String,
         client: SpoofClient,
@@ -80,6 +121,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
     ): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
             val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
+            val poToken = if (client.requiresStreamToken) playerToken(id) else null
             val payload = buildJsonObject {
                 put("videoId", id)
                 put("contentCheckOk", true)
@@ -87,9 +129,14 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 put("playbackContext", buildJsonObject {
                     put("contentPlaybackContext", buildJsonObject {
                         put("html5Preference", "HTML5_PREF_WANTS")
-                        put("signatureTimestamp", 20723)
+                        put("signatureTimestamp", signatureTimestamp(id))
                     })
                 })
+                if (poToken != null) {
+                    put("serviceIntegrityDimensions", buildJsonObject {
+                        put("poToken", poToken)
+                    })
+                }
                 put("context", client.buildClientContext(api.visitor_id))
             }
 
@@ -145,7 +192,12 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
         }.getOrNull()
     }
 
-    suspend fun getRestrictedVideo(id: String, cookie: String? = null): YoutubeFormatResponse? {
+    data class RestrictedVideoResult(
+        val response: YoutubeFormatResponse,
+        val client: SpoofClient
+    )
+
+    suspend fun getRestrictedVideo(id: String, cookie: String? = null): RestrictedVideoResult? {
         val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
         println("EchoVideoEndpoint: getRestrictedVideo for $id. Cookie present: ${!userCookie.isNullOrBlank()}, length: ${userCookie?.length ?: 0}")
         if (!userCookie.isNullOrBlank()) {
@@ -155,18 +207,19 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
             println("EchoVideoEndpoint: WARNING - No cookie found in globalCookie or user_auth_state! Age-restricted videos require login cookies.")
         }
         val remixResp = tryWebRemix(id, userCookie)
-        if (remixResp != null) return remixResp
+        if (remixResp != null) return RestrictedVideoResult(remixResp, SpoofClient.WEB_REMIX)
 
         println("EchoVideoEndpoint: tryWebRemix failed to return formats, falling back to tryWebCreator...")
         val creatorResp = tryWebCreator(id, userCookie)
-        if (creatorResp != null) return creatorResp
+        if (creatorResp != null) return RestrictedVideoResult(creatorResp, SpoofClient.WEB_CREATOR)
 
         println("EchoVideoEndpoint: tryWebCreator failed, falling back to tryTvClient...")
-        return tryTvClient(id, userCookie)
+        return tryTvClient(id, userCookie)?.let { RestrictedVideoResult(it, SpoofClient.TV) }
     }
 
     private suspend fun tryWebRemix(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
+            val poToken = playerToken(id)
             val payload = buildJsonObject {
                 put("videoId", id)
                 put("contentCheckOk", true)
@@ -174,15 +227,21 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 put("playbackContext", buildJsonObject {
                     put("contentPlaybackContext", buildJsonObject {
                         put("html5Preference", "HTML5_PREF_WANTS")
-                        put("signatureTimestamp", 20723)
+                        put("signatureTimestamp", signatureTimestamp(id))
                     })
                 })
+                if (poToken != null) {
+                    put("serviceIntegrityDimensions", buildJsonObject {
+                        put("poToken", poToken)
+                    })
+                }
                 put("context", buildJsonObject {
                     put("client", buildJsonObject {
                         put("clientName", "WEB_REMIX")
                         put("clientVersion", "1.20260928.13.00")
                         put("hl", "en")
                         put("gl", "US")
+                        api.visitor_id?.let { put("visitorData", it) }
                     })
                 })
             }
@@ -235,6 +294,7 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
 
     private suspend fun tryWebCreator(id: String, cookie: String?): YoutubeFormatResponse? = withContext(Dispatchers.IO) {
         runCatching {
+            val poToken = playerToken(id)
             val payload = buildJsonObject {
                 put("videoId", id)
                 put("contentCheckOk", true)
@@ -242,15 +302,21 @@ class EchoVideoEndpoint(override val api: YoutubeiApi) : ApiEndpoint() {
                 put("playbackContext", buildJsonObject {
                     put("contentPlaybackContext", buildJsonObject {
                         put("html5Preference", "HTML5_PREF_WANTS")
-                        put("signatureTimestamp", 20723)
+                        put("signatureTimestamp", signatureTimestamp(id))
                     })
                 })
+                if (poToken != null) {
+                    put("serviceIntegrityDimensions", buildJsonObject {
+                        put("poToken", poToken)
+                    })
+                }
                 put("context", buildJsonObject {
                     put("client", buildJsonObject {
                         put("clientName", "WEB_CREATOR")
                         put("clientVersion", "1.20261001.00.00")
                         put("hl", "en")
                         put("gl", "US")
+                        api.visitor_id?.let { put("visitorData", it) }
                     })
                 })
             }

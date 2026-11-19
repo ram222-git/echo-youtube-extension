@@ -24,9 +24,26 @@ dependencies {
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
 
-    api(libs.ytmkt) { 
+    // Android framework (headless WebView for the on-device PO Token minter).
+    // Provided at runtime by the host app process; compile-only so it is never
+    // bundled into the extension jar.
+    val androidSdkDir = file(
+        System.getenv("ANDROID_HOME")
+            ?: System.getenv("ANDROID_SDK_ROOT")
+            ?: "${System.getProperty("user.home")}/AppData/Local/Android/Sdk"
+    )
+    val androidJar = androidSdkDir.resolve("platforms").listFiles()
+        ?.filter { it.name.startsWith("android-") && it.resolve("android.jar").isFile }
+        ?.maxByOrNull { it.name.removePrefix("android-").toDoubleOrNull() ?: 0.0 }
+        ?.resolve("android.jar")
+    require(androidJar != null) {
+        "Android SDK platform not found under ${androidSdkDir}/platforms - needed to compile the on-device PO Token minter (android.webkit.WebView)"
+    }
+    compileOnly(files(androidJar))
+
+    api(libs.ytmkt) {
         excludeKotlin()
-    }  
+    }
     implementation(libs.newpipe) { excludeKotlin() }
     implementation(libs.rhino) { excludeKotlin() }
     implementation(libs.ktor.client.core) { excludeKotlin() }

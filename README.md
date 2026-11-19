@@ -55,6 +55,13 @@ Inside Echo's Extension Settings for YouTube Music:
 | **Preload Stream on Song Open** | Resolves the audio stream in the background when a song is opened, so playback starts instantly (uses a little extra data). | `Enabled` |
 | **Send Listening Data to Google** | Uploads listening history to YouTube Music to update your recommendations, stats, and Year-in-Review. | `Enabled` |
 | **Spoof Video Streams Client** | Spoofs YouTube Innertube client parameters (Auto, visionOS, iOS, TV, MWEB, Web Remix). | `Auto` |
+| **PO Token Provider** | How PO Tokens are obtained for age-restricted / account-locked tracks (these are only served to web clients, whose stream URLs the CDN rejects without a token): **On-device** — minted on this phone in a headless WebView, no server needed (recommended, device-verified); **Off** — token-free clients only; **External** — a user-hosted `bgutil-ytdlp-pot-provider` server. On-device falls back to External when a URL is also set. | `On-device` |
+| **PO Token Server URL** | Base URL of a `bgutil-ytdlp-pot-provider` compatible server (e.g. `http://192.168.1.10:4416`); entering a URL enables tokens for the External mode. Optional. | *empty* |
+
+### PO Tokens — what requires what
+
+- Normal and signed-in tracks play through **token-free clients** (visionOS / TVHTML5) with **no configuration**.
+- **Age-restricted or account-locked tracks** (signed in) need a PO Token on the web-client lane. **On-device** generates it on the phone (anonymous BotGuard attestation; no PC, no server, no API key; no cookies ever leave the device — minting traffic is cookie-less) and is verified working on real devices. If your WebView is too old or minting fails, playback falls back to the token-free clients, and the **External** server remains as a fallback. Tokens are bound to the video being played, cached in memory only, and never stored or logged.
 
 ---
 

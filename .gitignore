@@ -10,3 +10,7 @@ local.properties
 .kotlin
 opencode.jsonc
 
+# Local-only credentials for diagnostics. Never commit.
+.env.local
+scratch/
+
