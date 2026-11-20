@@ -52,6 +52,7 @@ import dev.brahmkshatriya.echo.extension.providers.ExtensionComponents
 import dev.brahmkshatriya.echo.extension.streaming.SettingsPoTokenProvider
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
+import dev.brahmkshatriya.echo.extension.utils.WebViewCookieWaiter
 import dev.brahmkshatriya.echo.extension.utils.stringSetting
 import dev.toastbits.ytmkt.endpoint.SearchType
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
@@ -92,9 +93,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             false
         ),
         SettingSwitch(
-            "Preload Stream on Song Open",
+            "Preload Streams",
             "preload_stream",
-            "Resolves the audio stream in the background when a song is opened, so playback starts instantly. Uses a small amount of extra data.",
+            "Resolves audio in the background for opened songs and the first few tracks of loaded lists, so playback starts instantly. Uses a small amount of extra data.",
             true
         ),
         SettingSwitch(
@@ -242,6 +243,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                         })
                     } else shelves
                 }
+                components.streamPrefetcher.prefetchShelves(data)
                 Page(data, result.ctoken)
             }
             Feed.Data(pagedData)
@@ -306,6 +308,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         // Featured on, Fans might also like) added shelves the song info page never shows
         // in YouTube Music. The artist page keeps using getArtistMediaItems() on its own page.
 
+        components.streamPrefetcher.prefetchShelves(shelves)
         shelves
     }.toFeed()
 
@@ -331,8 +334,11 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         return components.searchFeedProvider.loadSearchFeed(query, thumbnailQuality)
     }
     
-    override suspend fun loadTracks(radio: Radio): Feed<Track> =
-        components.radioGenerator.loadRadioTracks(radio)
+    override suspend fun loadTracks(radio: Radio): Feed<Track> {
+        val feed = components.radioGenerator.loadRadioTracks(radio)
+        components.streamPrefetcher.prefetchPaged(feed.pagedDataOfFirst())
+        return feed
+    }
 
     suspend fun radio(album: Album): Radio {
         return components.radioGenerator.generateRadio(album)
@@ -356,12 +362,17 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
+        fun feedOf(shelves: List<Shelf>): Feed<Shelf> {
+            components.streamPrefetcher.prefetchShelves(shelves)
+            return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+        }
+
         // 1. Check if the album's carousel shelves (e.g. "Releases for you", "More by...") are already cached
         val cachedLayouts = playlistEndPoint.albumShelvesMap[album.id]
             ?: playlistEndPoint.albumShelvesMap[cleanPlaylistId(album.id)]
         if (!cachedLayouts.isNullOrEmpty()) {
             val shelves = cachedLayouts.map { it.toShelf(api, api.data_language, thumbnailQuality) }
-            return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+            return feedOf(shelves)
         }
 
         // 2. If not yet loaded, load the album to fetch tracks and shelves
@@ -370,7 +381,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             ?: playlistEndPoint.albumShelvesMap[cleanPlaylistId(album.id)]
         if (!afterLoadLayouts.isNullOrEmpty()) {
             val shelves = afterLoadLayouts.map { it.toShelf(api, api.data_language, thumbnailQuality) }
-            return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+            return feedOf(shelves)
         }
 
         // 3. Fallback: browse the album directly via songFeedEndPoint to get its shelves
@@ -383,7 +394,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
                     shelf !is Shelf.Lists.Tracks || shelf.title.contains("release", ignoreCase = true) || shelf.title.contains("more", ignoreCase = true)
                 }
             if (shelves.isNotEmpty()) {
-                return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
+                return feedOf(shelves)
             }
         }
 
@@ -392,9 +403,7 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         val lastTrack = tracks.lastOrNull() ?: return null
         val loadedTrack = loadTrack(lastTrack, false)
         val shelves = loadRelated(loadedTrack)
-        return if (shelves.isNotEmpty()) {
-            Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
-        } else null
+        return if (shelves.isNotEmpty()) feedOf(shelves) else null
     }
 
 
@@ -424,10 +433,15 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun loadTracks(album: Album): Feed<Track>? {
         val cached = trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)]
-        if (cached != null) return cached.toFeed()
+        if (cached != null) {
+            components.streamPrefetcher.prefetchPaged(cached)
+            return cached.toFeed()
+        }
 
         loadAlbum(album)
-        return (trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)])?.toFeed()
+        val data = trackMap[album.id] ?: trackMap[cleanPlaylistId(album.id)]
+        if (data != null) components.streamPrefetcher.prefetchPaged(data)
+        return data?.toFeed()
     }
 
     private val artistIdCache = mutableMapOf<String, String>()
@@ -503,6 +517,8 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
         val shelves = getArtistMediaItems(artist)
+        // "Top songs" and artist carousels are one tap away from playback.
+        components.streamPrefetcher.prefetchShelves(shelves)
         return Feed(emptyList()) { _ -> PagedData.Single { shelves }.toFeedData() }
     }
 
@@ -549,7 +565,8 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         } catch (e: Exception) {
             emptyList()
         }
-        
+
+        components.streamPrefetcher.prefetchShelves(shelves)
         return if (shelves.isNotEmpty()) {
             Feed(emptyList()) { _ -> Feed.Data(PagedData.Single { shelves }) }
         } else {
@@ -573,10 +590,15 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
         val cached = trackMap[playlist.id] ?: trackMap[cleanPlaylistId(playlist.id)]
-        if (cached != null) return cached.toFeed()
+        if (cached != null) {
+            components.streamPrefetcher.prefetchPaged(cached)
+            return cached.toFeed()
+        }
 
         loadPlaylist(playlist)
-        return (trackMap[playlist.id] ?: trackMap[cleanPlaylistId(playlist.id)])?.toFeed() ?: listOf<Track>().toFeed()
+        val data = trackMap[playlist.id] ?: trackMap[cleanPlaylistId(playlist.id)]
+        if (data != null) components.streamPrefetcher.prefetchPaged(data)
+        return data?.toFeed() ?: listOf<Track>().toFeed()
     }
 
 
@@ -585,9 +607,18 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             "https://accounts.google.com/v3/signin/identifier?dsh=S1527412391%3A1678373417598386&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Den-GB%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F%253Fcbrd%253D1%26feature%3D__FEATURE__&hl=en-GB&ifkv=AWnogHfK4OXI8X1zVlVjzzjybvICXS4ojnbvzpE4Gn_Pfddw7fs3ERdfk-q3tRimJuoXjfofz6wuzg&ltmpl=music&passive=true&service=youtube&uilel=3&flowName=GlifWebSignIn&flowEntry=ServiceLogin".toGetRequest()
         override val stopUrlRegex = "https://music\\.youtube\\.com/.*".toRegex()
         override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
-            val cookieMap = CookieParser.parse(cookie)
+            // The stop hook fires on the first music.youtube.com request, which may
+            // land before Google commits the session cookies; wait for a real
+            // session instead of failing a sign-in that actually succeeded.
+            val resolved = WebViewCookieWaiter.waitUntilSapisid(cookie, url = url.url)
+            val cookieMap = CookieParser.parse(resolved.cookie)
             val sapisid = CookieParser.getSapisid(cookieMap)
-                ?: throw Exception("Login Failed SAPISID cookie not found or empty. Please try logging in again.")
+                ?: throw Exception(
+                    "Login Failed SAPISID cookie not found or empty after " +
+                        "${WebViewCookieWaiter.DEFAULT_TIMEOUT_MS} ms of waiting. " +
+                        "Please try logging in again. " +
+                        "(cookies seen: ${cookieMap.keys.sorted().take(15).joinToString(", ")})"
+                )
             
             val auth = CookieParser.generateDynamicAuthHeader(cookieMap)
             val authHeaders = headers {
@@ -842,6 +873,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
     
     override suspend fun onTrackChanged(details: TrackDetails?) {
         components.playbackTracker.startTracking(details?.track, components.sendBackToGoogle)
+        // The track that just started tells us where in a served list we are;
+        // warming its successor is what makes a manual skip instant.
+        components.streamPrefetcher.onCurrentTrack(details?.track)
     }
     
     override suspend fun onPlayingStateChanged(details: TrackDetails?, isPlaying: Boolean) {}

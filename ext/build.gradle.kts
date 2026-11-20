@@ -56,6 +56,11 @@ dependencies {
     testImplementation(libs.echo.common)
 }
 
+// JUnit 4 (vintage style) — without this Gradle 9 discovers no tests at all.
+tasks.withType<Test>().configureEach {
+    useJUnit()
+}
+
 
 // Extension properties goto `gradle.properties` to set values
 

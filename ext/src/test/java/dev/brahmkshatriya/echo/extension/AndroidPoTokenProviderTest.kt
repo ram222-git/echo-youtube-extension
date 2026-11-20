@@ -236,6 +236,29 @@ class AndroidPoTokenProviderTest {
         assertEquals(0, factory.creations)
     }
 
+    @Test
+    fun `warmUp boots the engine without minting`() = runTest {
+        val engine = FakeEngine()
+        val factory = FakeFactory(engine)
+        val provider = AndroidPoTokenProvider(engineFactory = factory::create)
+
+        provider.warmUp()
+
+        assertEquals(1, factory.creations)
+        assertTrue(engine.mintCalls.isEmpty())
+    }
+
+    @Test
+    fun `warmUp does not retry a permanently broken provider`() = runTest {
+        val factory = FakeFactory(null as FakeEngine?)
+        val provider = AndroidPoTokenProvider(engineFactory = factory::create)
+
+        assertNull(provider.token("v")) // marks the provider broken
+        provider.warmUp()
+
+        assertEquals(1, factory.creations)
+    }
+
     // ------------------------------------------------------------------
     // Settings chain
     // ------------------------------------------------------------------

@@ -11,6 +11,8 @@ import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiAuthenticationState
 import io.ktor.client.request.request
 import io.ktor.http.headers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class YouTubeAuthManager(
     private val api: YoutubeiApi,
@@ -32,6 +34,9 @@ class YouTubeAuthManager(
     @Volatile
     var onCookieUpdate: ((String) -> Unit)? = null
 
+    /** Single-flight: the prefetcher and the resolver may ask at the same moment. */
+    private val visitorLock = Mutex()
+
     private data class PendingCredentials(
         val cookie: String,
         val auth: String,
@@ -39,10 +44,8 @@ class YouTubeAuthManager(
     )
 
     suspend fun ensureVisitorId(): Result<String> = runCatching {
-        api.visitor_id ?: run {
-            val visitorId = visitorEndpoint.getVisitorId()
-            api.visitor_id = visitorId
-            visitorId
+        api.visitor_id ?: visitorLock.withLock {
+            api.visitor_id ?: visitorEndpoint.getVisitorId().also { api.visitor_id = it }
         }
     }
 

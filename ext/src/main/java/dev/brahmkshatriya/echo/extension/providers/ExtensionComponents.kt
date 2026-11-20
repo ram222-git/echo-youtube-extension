@@ -31,13 +31,19 @@ import dev.brahmkshatriya.echo.extension.providers.social.ShareManager
 import dev.brahmkshatriya.echo.extension.search.YouTubeSearchService
 import dev.brahmkshatriya.echo.extension.streaming.PoTokenProvider
 import dev.brahmkshatriya.echo.extension.streaming.SettingsPoTokenProvider
+import dev.brahmkshatriya.echo.extension.streaming.AndroidStreamCacheFile
+import dev.brahmkshatriya.echo.extension.streaming.FileStreamCacheStore
 import dev.brahmkshatriya.echo.extension.streaming.StreamMediaCache
+import dev.brahmkshatriya.echo.extension.streaming.StreamHttpClient
+import dev.brahmkshatriya.echo.extension.streaming.StreamPrefetcher
 import dev.brahmkshatriya.echo.extension.streaming.YouTubeStreamResolver
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 
 //Central hub for creating and managing all extension components.
@@ -103,7 +109,12 @@ class ExtensionComponents(
         YouTubeAuthManager(api, visitorEndpoint, accountEndpoint)
     }
 
-    val streamCache = StreamMediaCache()
+    val streamCache = StreamMediaCache(
+        // Persist the resolved-stream LRU to the host's private storage so the
+        // first tap after an app restart is a cache hit within the URL validity
+        // window. Entries never outlive their expiry and hold no secrets.
+        store = AndroidStreamCacheFile.resolve()?.let { FileStreamCacheStore(it) }
+    )
 
     /**
      * `off` unless the user configures an external minter. The provider reads the
@@ -123,12 +134,28 @@ class ExtensionComponents(
             poTokenProvider = poTokenProvider,
             sessionKey = {
                 "${api.visitor_id ?: "anon"}|${authManager.getCurrentUserId() ?: "anon"}"
-            }
+            },
+            ensureVisitorId = { authManager.ensureVisitorId().getOrNull() }
         )
     }
 
     /** Long-lived scope for speculative work (stream preloading, solver warm-up). */
     val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Warms the audio of the first tracks of every loaded list, so a tap plays from
+     * the cache instead of starting a player request. Gated by the same setting as
+     * the on-open preload.
+     */
+    val streamPrefetcher by lazy {
+        StreamPrefetcher(
+            resolveStreamable = { streamable, videoId ->
+                streamResolver.resolveStreamable(streamable, videoId)
+            },
+            scope = ioScope,
+            enabled = { preloadStream }
+        )
+    }
 
     val searchService by lazy {
         YouTubeSearchService(api)
@@ -137,15 +164,15 @@ class ExtensionComponents(
     //providers
 
     val libraryFeedProvider by lazy {
-        LibraryFeedProvider(api, authManager, libraryEndpoint)
+        LibraryFeedProvider(api, authManager, libraryEndpoint, streamPrefetcher)
     }
 
     val searchFeedProvider by lazy {
-        SearchFeedProvider(api, searchService, songFeedEndpoint)
+        SearchFeedProvider(api, searchService, songFeedEndpoint, streamPrefetcher)
     }
 
     val trackLoader by lazy {
-        TrackLoader(authManager, enhancedSongEndpoint, streamResolver, ioScope) { preloadStream }
+        TrackLoader(enhancedSongEndpoint, streamResolver, streamPrefetcher)
     }
 
     val radioGenerator by lazy {
@@ -172,4 +199,30 @@ class ExtensionComponents(
     
     // Track cache for album/playlist tracks
     val trackCache = mutableMapOf<String, PagedData<Track>>()
+
+    init {
+        // Pay the cold-start costs (visitor id round-trip, WebView mint engine boot)
+        // while the user is browsing instead of on the first tap of play. Only when
+        // stream preloading is enabled, so opting out costs nothing.
+        ioScope.launch {
+            if (!preloadStream) return@launch
+            // Cheap, and directly on the first play path: this also opens the
+            // TLS connection every Innertube request reuses.
+            runCatching { authManager.ensureVisitorId() }
+
+            // The visitor call uses the Ktor client; the player request uses
+            // OkHttp, so its cold handshake needs its own warm-up.
+            StreamHttpClient.warmUpPlayer()
+
+            // The WebView boot is created on the main thread and is CPU-heavy.
+            // Delay it so the first tap after launch never competes with it; the
+            // token is only needed by web lanes, which are never the first lane.
+            delay(TOKEN_WARM_DELAY_MS)
+            runCatching { poTokenProvider.warmUp() }
+        }
+    }
+
+    private companion object {
+        const val TOKEN_WARM_DELAY_MS = 3_000L
+    }
 }

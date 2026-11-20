@@ -4,6 +4,7 @@ import dev.brahmkshatriya.echo.extension.RealNewPipeVideoFormatsEndpoint
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.streaming.StreamHttpClient
 import dev.brahmkshatriya.echo.extension.streaming.requiresStreamToken
+import dev.brahmkshatriya.echo.extension.streaming.requiresSignatureTimestamp
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.ApiEndpoint
@@ -234,7 +235,27 @@ class EchoVideoEndpoint(
         if (client == SpoofClient.WEB_EMBEDDED) {
             return@withContext tryWebEmbedded(id, cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie)
         }
-        runCatching {
+
+        // Web players validate a signature timestamp; mobile/TV clients do not.
+        // Start without it (no player-JS download) and pay for it only when the
+        // lane returns nothing, instead of stalling every first playback.
+        if (client.requiresSignatureTimestamp) {
+            return@withContext requestSpoofedVideo(id, client, cookie, includeSignatureTimestamp = true)
+        }
+
+        val withoutTimestamp = requestSpoofedVideo(id, client, cookie, includeSignatureTimestamp = false)
+        if (withoutTimestamp != null) return@withContext withoutTimestamp
+
+        println("EchoVideoEndpoint: ${client.displayName} returned no formats without a signatureTimestamp, retrying with it")
+        requestSpoofedVideo(id, client, cookie, includeSignatureTimestamp = true)
+    }
+
+    private suspend fun requestSpoofedVideo(
+        id: String,
+        client: SpoofClient,
+        cookie: String?,
+        includeSignatureTimestamp: Boolean
+    ): YoutubeFormatResponse? = runCatching {
             val userCookie = cookie ?: RealNewPipeVideoFormatsEndpoint.globalCookie ?: api.user_auth_state?.headers?.get("cookie")
             val poToken = if (client.requiresStreamToken) playerToken(id) else null
             val payload = buildJsonObject {
@@ -244,7 +265,9 @@ class EchoVideoEndpoint(
                 put("playbackContext", buildJsonObject {
                     put("contentPlaybackContext", buildJsonObject {
                         put("html5Preference", "HTML5_PREF_WANTS")
-                        put("signatureTimestamp", signatureTimestamp(id))
+                        if (includeSignatureTimestamp) {
+                            put("signatureTimestamp", signatureTimestamp(id))
+                        }
                     })
                 })
                 if (poToken != null) {
@@ -298,16 +321,15 @@ class EchoVideoEndpoint(
             val resp = api.json.decodeFromString<YoutubeFormatResponse>(bodyString)
             val formats = resp.streamingData?.formats.orEmpty() + resp.streamingData?.adaptiveFormats.orEmpty()
             if (formats.isNotEmpty() || !resp.streamingData?.hlsManifestUrl.isNullOrEmpty()) {
-                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) succeeded for $id. Formats: ${formats.size}, HLS: ${resp.streamingData?.hlsManifestUrl != null}")
+                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) succeeded for $id. Formats: ${formats.size}, HLS: ${resp.streamingData?.hlsManifestUrl != null}, sts=$includeSignatureTimestamp")
                 resp
             } else {
-                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) returned no playable formats for $id. Status: ${resp.playabilityStatus?.status}, Reason: ${resp.playabilityStatus?.reason}")
+                println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) returned no playable formats for $id. Status: ${resp.playabilityStatus?.status}, Reason: ${resp.playabilityStatus?.reason}, sts=$includeSignatureTimestamp")
                 null
             }
         }.onFailure {
             println("EchoVideoEndpoint: getSpoofedVideo (${client.displayName}) failed for $id: ${it.javaClass.simpleName} - ${it.message}")
         }.getOrNull()
-    }
 
     data class RestrictedVideoResult(
         val response: YoutubeFormatResponse,

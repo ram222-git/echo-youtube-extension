@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.streaming.normalizedPoTokenBaseUrl
+import dev.brahmkshatriya.echo.extension.streaming.requiresSignatureTimestamp
 import dev.brahmkshatriya.echo.extension.streaming.requiresStreamToken
 import dev.brahmkshatriya.echo.extension.streaming.withPoToken
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -72,5 +73,21 @@ class StreamTokenPolicyTest {
     fun `web clients require a token`() {
         assertTrue(SpoofClient.WEB_REMIX.requiresStreamToken)
         assertTrue(SpoofClient.MWEB.requiresStreamToken)
+    }
+
+    @Test
+    fun `mobile and tv clients skip the signature timestamp`() {
+        assertFalse(SpoofClient.VISIONOS.requiresSignatureTimestamp)
+        assertFalse(SpoofClient.IOS.requiresSignatureTimestamp)
+        assertFalse(SpoofClient.TV.requiresSignatureTimestamp)
+        assertFalse(SpoofClient.TV_CURRENT.requiresSignatureTimestamp)
+        assertFalse(SpoofClient.TV_DOWNGRADED.requiresSignatureTimestamp)
+    }
+
+    @Test
+    fun `html5 clients require the signature timestamp`() {
+        assertTrue(SpoofClient.WEB_REMIX.requiresSignatureTimestamp)
+        assertTrue(SpoofClient.MWEB.requiresSignatureTimestamp)
+        assertTrue(SpoofClient.WEB_EMBEDDED.requiresSignatureTimestamp)
     }
 }

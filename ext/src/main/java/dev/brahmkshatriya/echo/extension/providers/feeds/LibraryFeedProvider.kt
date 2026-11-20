@@ -8,6 +8,7 @@ import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.extension.auth.YouTubeAuthManager
 import dev.brahmkshatriya.echo.extension.endpoints.EchoLibraryEndPoint
+import dev.brahmkshatriya.echo.extension.streaming.StreamPrefetcher
 import dev.brahmkshatriya.echo.extension.toEchoMediaItem
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.model.external.ThumbnailProvider
@@ -16,7 +17,8 @@ import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 class LibraryFeedProvider(
     private val api: YoutubeiApi,
     private val authManager: YouTubeAuthManager,
-    private val libraryEndpoint: EchoLibraryEndPoint
+    private val libraryEndpoint: EchoLibraryEndPoint,
+    private val prefetcher: StreamPrefetcher? = null
 ) {
     suspend fun loadLibraryFeed(thumbnailQuality: ThumbnailProvider.Quality): Feed<Shelf> {
         val tabs = listOf(
@@ -117,6 +119,7 @@ class LibraryFeedProvider(
         val shelves = result.mapNotNull { playlist ->
             playlist.toEchoMediaItem(false, thumbnailQuality)?.let { Shelf.Item(it) }
         }
+        prefetcher?.prefetchShelves(shelves)
         return Page(shelves, ctoken)
     }
 }

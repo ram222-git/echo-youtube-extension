@@ -9,6 +9,7 @@ import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.extension.YoutubeExtension
 import dev.brahmkshatriya.echo.extension.endpoints.EchoSongFeedEndpoint
 import dev.brahmkshatriya.echo.extension.search.YouTubeSearchService
+import dev.brahmkshatriya.echo.extension.streaming.StreamPrefetcher
 import dev.brahmkshatriya.echo.extension.toShelf
 import dev.toastbits.ytmkt.endpoint.SearchType
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
@@ -18,7 +19,8 @@ import dev.toastbits.ytmkt.model.external.ThumbnailProvider
 class SearchFeedProvider(
     private val api: YoutubeiApi,
     private val searchService: YouTubeSearchService,
-    private val songFeedEndpoint: EchoSongFeedEndpoint
+    private val songFeedEndpoint: EchoSongFeedEndpoint,
+    private val prefetcher: StreamPrefetcher? = null
 ) {
     suspend fun loadSearchFeed(
         query: String,
@@ -81,6 +83,7 @@ class SearchFeedProvider(
                         itemLayout.toShelf(api, YoutubeExtension.SINGLES, thumbnailQuality)
                     }
 
+                    prefetcher?.prefetchShelves(data)
                     Page(data, browseResult.ctoken)
                 } catch (e: Exception) {
                     Page(emptyList(), null)
@@ -97,6 +100,7 @@ class SearchFeedProvider(
         return try {
             val results = searchService.searchAllCategories(query, thumbnailQuality)
             val shelves = searchService.mergeCategoryResults(results)
+            prefetcher?.prefetchShelves(shelves)
             shelves.toFeedData()
         } catch (e: Exception) {
             println("All categories search failed: ${e.message}")
@@ -111,6 +115,7 @@ class SearchFeedProvider(
     ): Feed.Data<Shelf> {
         return try {
             val result = searchService.searchCategory(query, searchType, thumbnailQuality)
+            prefetcher?.prefetchShelves(result.shelves)
             result.shelves.toFeedData()
         } catch (e: Exception) {
             println("${searchType.name} search failed: ${e.message}")

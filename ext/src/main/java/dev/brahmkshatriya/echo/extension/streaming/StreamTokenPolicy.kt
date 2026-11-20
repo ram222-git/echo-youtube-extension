@@ -16,6 +16,21 @@ internal val SpoofClient.requiresStreamToken: Boolean
     }
 
 /**
+ * Clients whose player request needs a `signatureTimestamp` in
+ * `contentPlaybackContext`.
+ *
+ * Only HTML5/web players validate it; the mobile (iOS, visionOS) and TV clients
+ * answer fine without one. Asking NewPipe for the timestamp costs a full
+ * `base.js` download + parse on a cold process (seconds), so the resolver tries
+ * those lanes without it and retries with it only when a lane returns nothing.
+ */
+internal val SpoofClient.requiresSignatureTimestamp: Boolean
+    get() = when (clientName.uppercase()) {
+        "WEB", "WEB_REMIX", "MWEB", "WEB_CREATOR", "WEB_EMBEDDED_PLAYER" -> true
+        else -> false
+    }
+
+/**
  * Appends (or replaces) the `pot` query parameter on a googlevideo URL.
  *
  * Uses the URL builder rather than string concatenation: stream URLs already

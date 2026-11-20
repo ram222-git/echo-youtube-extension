@@ -37,6 +37,12 @@ interface PoTokenProvider {
 
     /** Drops every cached token. Called on logout, account switch and 403. */
     fun invalidate()
+
+    /**
+     * Best-effort background preparation (e.g. booting the on-device minting
+     * engine) so the first real playback does not pay for it. Must never throw.
+     */
+    suspend fun warmUp() = Unit
 }
 
 /** No provider configured: token-dependent clients are skipped. */
@@ -105,6 +111,16 @@ class SettingsPoTokenProvider(
     override fun invalidate() {
         androidProvider.invalidate()
         external.invalidate()
+    }
+
+    /**
+     * Boots the on-device engine (the cold part of minting) without touching the
+     * network, when the on-device mode is selected. External providers are HTTP
+     * calls and need no warm-up.
+     */
+    override suspend fun warmUp() {
+        if (mode() != MODE_ANDROID) return
+        runCatching { androidProvider.warmUp() }
     }
 
     /** Drops tokens *and* the on-device engine; used on settings changes. */

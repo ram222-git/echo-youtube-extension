@@ -28,11 +28,18 @@ class YouTubeStreamResolver(
     private val cache: StreamMediaCache = StreamMediaCache(),
     private val poTokenProvider: PoTokenProvider = OffPoTokenProvider,
     /** Identity of the current session, used to keep cached media per account. */
-    private val sessionKey: () -> String = { "" }
+    private val sessionKey: () -> String = { "" },
+    /**
+     * Single-flight visitor lookup shared with the auth manager, so the prefetcher
+     * and the real play request never fetch two visitor IDs at once.
+     */
+    private val ensureVisitorId: suspend () -> String? = { visitorEndpoint.getVisitorId() }
 ) {
     companion object {
         private val HEIGHT_REGEX = Regex("(\\d+)p")
         private const val PROBE_TIMEOUT_MS = 800L
+
+        private fun nowMs(): Long = System.nanoTime() / 1_000_000
     }
 
     private fun getRealNewPipe() = RealNewPipeVideoFormatsEndpoint()
@@ -84,22 +91,28 @@ class YouTubeStreamResolver(
      * the source. The OkHttp call timeout in [StreamHttpClient.probe] is the real
      * upper bound, because a blocking `execute()` ignores coroutine cancellation.
      */
-    private suspend fun probePlayable(url: String): Boolean = withContext(Dispatchers.IO) {
-        val result = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
-            try {
-                probeStream(url)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                println("YouTubeStreamResolver: probe error (${e.message}), assuming playable")
-                true
+    private suspend fun probePlayable(url: String, timing: ResolveTiming? = null): Boolean =
+        withContext(Dispatchers.IO) {
+            val started = nowMs()
+            val result = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+                try {
+                    probeStream(url)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    println("YouTubeStreamResolver: probe error (${e.message}), assuming playable")
+                    true
+                }
             }
+            timing?.addProbe(nowMs() - started)
+            result ?: true
         }
-        result ?: true
-    }
 
-    private suspend fun probeAllPlayable(vararg urls: String): Boolean = coroutineScope {
-        urls.map { url -> async(Dispatchers.IO) { probePlayable(url) } }
+    private suspend fun probeAllPlayable(
+        vararg urls: String,
+        timing: ResolveTiming? = null
+    ): Boolean = coroutineScope {
+        urls.map { url -> async(Dispatchers.IO) { probePlayable(url, timing) } }
             .map { it.await() }
             .all { it }
     }
@@ -217,6 +230,28 @@ class YouTubeStreamResolver(
         return "${poTokenProvider.kind}:${sessionKey()}"
     }
 
+    /**
+     * Visitors are only needed by the web/embedded lanes (their URLs are bound to
+     * the visitor a PO Token was minted for). The mobile and TV clients play
+     * without one, so this is never awaited before the fast lane.
+     */
+    private suspend fun ensureVisitorAvailable(timing: ResolveTiming? = null) {
+        if (api.visitor_id != null) return
+        val started = nowMs()
+        runCatching { ensureVisitorId() }
+            .onSuccess { if (!it.isNullOrBlank()) api.visitor_id = it }
+            .onFailure { println("YouTubeStreamResolver: visitor id fetch failed (${it.message})") }
+        timing?.addVisitor(nowMs() - started)
+    }
+
+    /**
+     * Token-free lanes (visionOS, iOS, TV) hand out signed URLs in a single
+     * response and are trusted; only web/unknown lanes get the extra health check
+     * that guards against caching a 403.
+     */
+    private fun shouldProbe(client: SpoofClient?): Boolean =
+        client == null || client.requiresStreamToken
+
     suspend fun resolveStreamable(videoId: String): Streamable.Media {
         return resolveStreamable(null, videoId)
     }
@@ -228,16 +263,58 @@ class YouTubeStreamResolver(
         val type = streamable?.extras?.get("type") ?: "audio"
         val height = streamable?.extras?.get("height") ?: "0"
         val key = "$videoId|$type|$height|${spoofSetting()}|${sessionSuffix()}"
+        val benchKey = "resolve:$key"
+        val started = nowMs()
+        PlaybackBench.spanStart(benchKey)
+        cache.get(key)?.let {
+            PlaybackBench.spanEnd(benchKey, "streamResolved", "v=$videoId cache=hit")
+            println("YouTubeStreamResolver: resolve $videoId type=$type cache=hit total=${nowMs() - started}ms")
+            return it
+        }
+
         println("Loading streamable media for video ID: $videoId (type=$type)")
+        val timing = ResolveTiming()
         return try {
-            cache.getOrResolve(key) { resolveStreamableInternal(streamable, videoId) }
+            var didResolve = false
+            val media = cache.getOrResolve(key) {
+                didResolve = true
+                resolveStreamableInternal(streamable, videoId, timing)
+            }
+            PlaybackBench.spanEnd(benchKey, "streamResolved", "v=$videoId cache=${if (didResolve) "resolved" else "joined"}")
+            logResolve(videoId, type, "ok", timing, started, shared = !didResolve)
+            media
         } catch (e: kotlinx.coroutines.CancellationException) {
+            logResolve(videoId, type, "cancelled", timing, started)
             throw e
         } catch (e: Exception) {
+            PlaybackBench.spanEnd(benchKey, "streamResolveFailed", "v=$videoId")
             // Never keep a half-broken result around: a retry must hit the network.
             cache.invalidate("$videoId|$type|")
+            logResolve(videoId, type, "failed(${e.javaClass.simpleName})", timing, started)
             throw e
         }
+    }
+
+    /**
+     * One line per resolve, enough to prove on-device where the time went:
+     * `lanes` are the extraction lanes tried, `player` the Innertube player calls,
+     * `extract` the parsing/deciphering of the winning response (probe included),
+     * `probe` the playability checks and `visitor` the visitor-data round-trips.
+     * `cache=joined` means another caller (typically the prefetcher) had already
+     * started this exact resolve and this request only waited for it.
+     */
+    private fun logResolve(
+        videoId: String,
+        type: String,
+        outcome: String,
+        timing: ResolveTiming,
+        startedMs: Long,
+        shared: Boolean = false
+    ) {
+        println(
+            "YouTubeStreamResolver: resolve $videoId type=$type cache=${if (shared) "joined" else "miss"} " +
+                "outcome=$outcome total=${nowMs() - startedMs}ms ${timing.summary()}"
+        )
     }
 
     suspend fun resolveBackground(videoId: String): Streamable.Media {
@@ -249,28 +326,51 @@ class YouTubeStreamResolver(
             ?: streamable?.quality?.takeIf { it > 0 }
             ?: 720
         val key = "$videoId|background|$targetHeight|${spoofSetting()}|${sessionSuffix()}"
+        val benchKey = "resolve:$key"
+        val started = nowMs()
+        PlaybackBench.spanStart(benchKey)
+        cache.get(key)?.let {
+            PlaybackBench.spanEnd(benchKey, "streamResolved", "v=$videoId type=background cache=hit")
+            println("YouTubeStreamResolver: resolve $videoId type=background cache=hit total=${nowMs() - started}ms")
+            return it
+        }
+        val timing = ResolveTiming()
         return try {
-            cache.getOrResolve(key) { resolveBackgroundInternal(videoId, targetHeight) }
+            var didResolve = false
+            val media = cache.getOrResolve(key) {
+                didResolve = true
+                resolveBackgroundInternal(videoId, targetHeight, timing)
+            }
+            PlaybackBench.spanEnd(benchKey, "streamResolved", "v=$videoId type=background cache=${if (didResolve) "resolved" else "joined"}")
+            logResolve(videoId, "background", "ok", timing, started, shared = !didResolve)
+            media
         } catch (e: kotlinx.coroutines.CancellationException) {
+            logResolve(videoId, "background", "cancelled", timing, started)
             throw e
         } catch (e: Exception) {
+            PlaybackBench.spanEnd(benchKey, "streamResolveFailed", "v=$videoId type=background")
             cache.invalidate("$videoId|background|")
+            logResolve(videoId, "background", "failed(${e.javaClass.simpleName})", timing, started)
             throw e
         }
     }
 
-    private suspend fun resolveBackgroundInternal(videoId: String, targetHeight: Int): Streamable.Media {
+    private suspend fun resolveBackgroundInternal(
+        videoId: String,
+        targetHeight: Int,
+        timing: ResolveTiming? = null
+    ): Streamable.Media {
         println("Loading background video for video ID: $videoId at ${targetHeight}p")
 
         // 1. Fast path: visionOS (single player request, URLs that actually play)
         val spoofedVideoUrl = runCatching {
-            val res = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = true, targetHeight = targetHeight)
+            val res = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = true, targetHeight, timing)
             if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
                 val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
                 videoSource?.request?.url
             } else null
         }.getOrNull() ?: runCatching {
-            val res = trySpoofedExtractor(videoId, SpoofClient.IOS, isVideoRequest = true, targetHeight = targetHeight)
+            val res = trySpoofedExtractor(videoId, SpoofClient.IOS, isVideoRequest = true, targetHeight, timing)
             if (res is ExtractionResult.Success && res.media is Streamable.Media.Server) {
                 val videoSource = res.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
                 videoSource?.request?.url
@@ -314,7 +414,7 @@ class YouTubeStreamResolver(
                 videoMatch?.url ?: muxedStreams.firstOrNull()?.url
             }
         }.getOrNull() ?: runCatching {
-            val restricted = tryRestrictedVideoExtractor(videoId, isVideoRequest = true, targetHeight = targetHeight)
+            val restricted = tryRestrictedVideoExtractor(videoId, isVideoRequest = true, targetHeight = targetHeight, timing = timing)
             if (restricted is ExtractionResult.Success && restricted.media is Streamable.Media.Server) {
                 val videoSource = restricted.media.sources.firstOrNull { it.isVideo } as? Streamable.Source.Http
                 videoSource?.request?.url
@@ -326,7 +426,8 @@ class YouTubeStreamResolver(
     
     private suspend fun resolveStreamableInternal(
         streamable: Streamable?,
-        videoId: String
+        videoId: String,
+        timing: ResolveTiming? = null
     ): Streamable.Media {
         val streamType = streamable?.extras?.get("type")
         val isVideoRequest = streamType == "video"
@@ -335,12 +436,9 @@ class YouTubeStreamResolver(
         val errorReasons = mutableListOf<String>()
 
         // Web-client player requests must carry visitorData (context + X-Goog-Visitor-Id):
-        // token-consistent URLs are rejected by the CDN otherwise. Only fetch when a
-        // token provider is active, so token-free playback never pays the extra request.
-        if (poTokenProvider.kind != "off" && api.visitor_id == null) {
-            runCatching { api.visitor_id = visitorEndpoint.getVisitorId() }
-                .onFailure { println("YouTubeStreamResolver: visitor id fetch failed (${it.message})") }
-        }
+        // token-consistent URLs are rejected by the CDN otherwise. The lookup is
+        // deferred to the web lanes (see ensureVisitorAvailable) so the token-free
+        // fast path never pays for an extra request.
 
         val spoofClientSetting = spoofSetting()
         val specificClient = SpoofClient.fromId(spoofClientSetting)
@@ -348,7 +446,7 @@ class YouTubeStreamResolver(
 
         // 1. If user selected a specific spoof client (visionOS, iOS, TV, MWEB, WEB_REMIX), try it first!
         if (specificClient != null) {
-            val spoofResult = trySpoofedExtractorWithTokenRetry(videoId, specificClient, isVideoRequest, targetHeight)
+            val spoofResult = trySpoofedExtractorWithTokenRetry(videoId, specificClient, isVideoRequest, targetHeight, timing)
             if (spoofResult is ExtractionResult.Success) {
                 println("Successfully loaded streamable using spoofed client: ${specificClient.displayName}")
                 return spoofResult.media
@@ -359,21 +457,24 @@ class YouTubeStreamResolver(
         
         if (isVideoRequest) {
             // Video request cascade
-            // 1. Fast path: visionOS. One player request and it returns an HLS
-            //    manifest plus already-signed progressive URLs that actually play.
-            //    (iOS/TV currently hand out URLs that 403 on playback.)
-            val visionOsResult = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = true, targetHeight)
-            if (visionOsResult is ExtractionResult.Success) {
-                println("Successfully loaded video streamable using ${SpoofClient.VISIONOS.displayName}")
-                return visionOsResult.media
-            } else if (visionOsResult is ExtractionResult.Error) {
-                errorReasons.add("${SpoofClient.VISIONOS.displayName}: ${visionOsResult.reason}")
+            // 1. Fast path: visionOS (HLS manifest plus already-signed progressive
+            //    URLs). When signed in, TVHTML5 is raced against it: both are
+            //    token-free, so whichever answers first saves a full round-trip.
+            val fastLanes = fastLanes(specificClient)
+            if (fastLanes.isNotEmpty()) {
+                val fastResult = raceSpoofedExtractors(videoId, fastLanes, isVideoRequest = true, targetHeight, timing)
+                if (fastResult is ExtractionResult.Success) {
+                    println("Successfully loaded video streamable using one of ${fastLanes.joinToString(" / ") { it.displayName }}")
+                    return fastResult.media
+                } else if (fastResult is ExtractionResult.Error) {
+                    errorReasons.add(fastResult.reason)
+                }
             }
 
             // 2. Fallback: RealNewPipe extracts HLS + all progressive qualities with
             //    dynamic JS deciphering (most robust, but slower).
             println("RealNewPipe extractor for video ID: $videoId (Video)")
-            val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = true, targetHeight)
+            val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = true, targetHeight, timing)
             if (realNewPipeResult is ExtractionResult.Success) {
                 println("Successfully loaded video streamable using RealNewPipe extractor")
                 return realNewPipeResult.media
@@ -392,10 +493,10 @@ class YouTubeStreamResolver(
                     add(SpoofClient.WEB_EMBEDDED)
                 }
                 if (poTokenProvider.kind != "off") add(SpoofClient.WEB_REMIX)
-            }.filter { it != specificClient }
+            }.filter { it != specificClient && it !in fastLanes }
 
             for (client in videoCascade) {
-                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = true, targetHeight)
+                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = true, targetHeight, timing)
                 if (res is ExtractionResult.Success) {
                     println("Successfully loaded video streamable using ${client.displayName}")
                     return res.media
@@ -406,7 +507,7 @@ class YouTubeStreamResolver(
 
             // 3. Fallback: YtmKt (same Innertube family, different client)
             println("YtmKt extractor for video ID: $videoId (Video)")
-            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = true, targetHeight)
+            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = true, targetHeight, timing)
             if (ytmKtResult is ExtractionResult.Success) {
                 println("Successfully loaded video streamable using YtmKt library")
                 return ytmKtResult.media
@@ -416,7 +517,7 @@ class YouTubeStreamResolver(
 
             // 4. Fallback: YouTube Music API
             println("YouTube Music API extractor for video ID: $videoId (Video)")
-            val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = true, targetHeight)
+            val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = true, targetHeight, timing)
             if (youtubeMusicResult is ExtractionResult.Success) {
                 println("Successfully loaded video streamable using YouTube Music API")
                 return youtubeMusicResult.media
@@ -426,7 +527,7 @@ class YouTubeStreamResolver(
 
             // 5. Fallback: Restricted / Age-Restricted Video Extractor
             println("Restricted extractor for video ID: $videoId (Video)")
-            val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = true, targetHeight)
+            val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = true, targetHeight, timing)
             if (restrictedResult is ExtractionResult.Success) {
                 println("Successfully loaded video streamable using Restricted Video Extractor")
                 return restrictedResult.media
@@ -435,15 +536,17 @@ class YouTubeStreamResolver(
             }
         } else {
             // Audio request cascade
-            // 1. Fast path: visionOS. One player request, returns already-signed
-            //    direct URLs with all audio qualities. (iOS/TV URLs currently 403
-            //    on real playback, so they are only fallbacks.)
-            val visionOsResult = trySpoofedExtractor(videoId, SpoofClient.VISIONOS, isVideoRequest = false, targetHeight)
-            if (visionOsResult is ExtractionResult.Success) {
-                println("Successfully loaded audio streamable using ${SpoofClient.VISIONOS.displayName}")
-                return visionOsResult.media
-            } else if (visionOsResult is ExtractionResult.Error) {
-                errorReasons.add("${SpoofClient.VISIONOS.displayName}: ${visionOsResult.reason}")
+            // 1. Fast path: visionOS (already-signed direct URLs with all audio
+            //    qualities). Raced with TVHTML5 when signed in; both are token-free.
+            val fastLanes = fastLanes(specificClient)
+            if (fastLanes.isNotEmpty()) {
+                val fastResult = raceSpoofedExtractors(videoId, fastLanes, isVideoRequest = false, targetHeight, timing)
+                if (fastResult is ExtractionResult.Success) {
+                    println("Successfully loaded audio streamable using one of ${fastLanes.joinToString(" / ") { it.displayName }}")
+                    return fastResult.media
+                } else if (fastResult is ExtractionResult.Error) {
+                    errorReasons.add(fastResult.reason)
+                }
             }
 
             // 2. Token-free TV chain. TVHTML5 is the only token-free client that
@@ -458,10 +561,10 @@ class YouTubeStreamResolver(
                 // Web clients need a PO Token. Only spend the request when a
                 // provider is configured; otherwise this lane can never succeed.
                 if (poTokenProvider.kind != "off") add(SpoofClient.WEB_REMIX)
-            }.filter { it != specificClient }
+            }.filter { it != specificClient && it !in fastLanes }
 
             for (client in audioCascade) {
-                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = false, targetHeight)
+                val res = trySpoofedExtractorWithTokenRetry(videoId, client, isVideoRequest = false, targetHeight, timing)
                 if (res is ExtractionResult.Success) {
                     println("Successfully loaded audio streamable using ${client.displayName}")
                     return res.media
@@ -473,7 +576,7 @@ class YouTubeStreamResolver(
             // 3. Fallback: RealNewPipe extracts OPUS (160/70/50 kbps) + AAC (128/48 kbps)
             //    with dynamic JS deciphering.
             println("RealNewPipe extractor for video ID: $videoId (Audio - Opus/AAC)")
-            val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = false, targetHeight)
+            val realNewPipeResult = tryRealNewPipeExtractor(videoId, isVideoRequest = false, targetHeight, timing)
             if (realNewPipeResult is ExtractionResult.Success) {
                 println("Successfully loaded audio streamable using RealNewPipe (Opus/AAC)")
                 return realNewPipeResult.media
@@ -483,7 +586,7 @@ class YouTubeStreamResolver(
 
             // 4. Fallback: YtmKt (also supports Opus)
             println("YtmKt extractor for video ID: $videoId (Audio)")
-            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = false, targetHeight)
+            val ytmKtResult = tryYtmKtEndpoint(videoId, isVideoRequest = false, targetHeight, timing)
             if (ytmKtResult is ExtractionResult.Success) {
                 println("Successfully loaded audio streamable using YtmKt")
                 return ytmKtResult.media
@@ -493,7 +596,7 @@ class YouTubeStreamResolver(
 
             // 5. Fallback: YouTube Music API (AAC)
             println("YouTube Music API extractor for video ID: $videoId (Audio - AAC fallback)")
-            val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = false, targetHeight)
+            val youtubeMusicResult = tryYouTubeMusicApi(videoId, isVideoRequest = false, targetHeight, timing)
             if (youtubeMusicResult is ExtractionResult.Success) {
                 println("Successfully loaded audio streamable using YouTube Music API")
                 return youtubeMusicResult.media
@@ -503,7 +606,7 @@ class YouTubeStreamResolver(
 
             // 6. Fallback: Restricted / Age-Restricted Video Extractor
             println("Trying Restricted Video Extractor for video ID: $videoId (Audio)")
-            val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = false, targetHeight)
+            val restrictedResult = tryRestrictedVideoExtractor(videoId, isVideoRequest = false, targetHeight, timing)
             if (restrictedResult is ExtractionResult.Success) {
                 println("Successfully loaded audio streamable using Restricted Video Extractor")
                 return restrictedResult.media
@@ -545,12 +648,16 @@ class YouTubeStreamResolver(
     private suspend fun tryRealNewPipeExtractor(
         videoId: String,
         isVideoRequest: Boolean,
-        targetHeight: Int?
+        targetHeight: Int?,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
         return try {
+            timing?.lane("RealNewPipe")
             if (isVideoRequest) {
                 // Fetch all stream types in one network call
+                val started = nowMs()
                 val allResult = getRealNewPipe().getAllStreams(videoId)
+                timing?.addPlayer(nowMs() - started)
                 if (allResult.isSuccess) {
                     val streams = allResult.getOrThrow()
 
@@ -662,7 +769,9 @@ class YouTubeStreamResolver(
 
             // Audio extraction
             println("RealNewPipe: Extracting audio streams for $videoId")
+            val started = nowMs()
             val audioResult = getRealNewPipe().getAudioFormats(videoId)
+            timing?.addPlayer(nowMs() - started)
             if (audioResult.isFailure) {
                 return ExtractionResult.Failed
             }
@@ -696,12 +805,16 @@ class YouTubeStreamResolver(
     private suspend fun tryYtmKtEndpoint(
         videoId: String,
         isVideoRequest: Boolean,
-        targetHeight: Int?
+        targetHeight: Int?,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
         return try {
+            timing?.lane("YtmKt")
             if (isVideoRequest) {
                 val reqHeight = targetHeight ?: 720
+                val started = nowMs()
                 val separateResult = ytmKtEndpoint.getSeparateStreams(videoId, maxQuality = null)
+                timing?.addPlayer(nowMs() - started)
                 if (separateResult.isSuccess) {
                     val (videoFormats, audioFormats) = separateResult.getOrThrow()
                     val selectedVideo = videoFormats.minByOrNull { format ->
@@ -732,7 +845,9 @@ class YouTubeStreamResolver(
                 }
             }
 
+            val started = nowMs()
             val audioResult = ytmKtEndpoint.getAudioFormats(videoId)
+            timing?.addPlayer(nowMs() - started)
             if (audioResult.isFailure) {
                 return ExtractionResult.Error(audioResult.exceptionOrNull()?.message ?: "Failed to get audio")
             }
@@ -761,29 +876,166 @@ class YouTubeStreamResolver(
         }
     }
 
+    /**
+     * The lanes that are worth racing for the first request.
+     *
+     * visionOS is always tried: anonymous, token-free and it returns signed
+     * progressive URLs. TVHTML5 is raced alongside it only when a session cookie
+     * exists (without one it answers `UNPLAYABLE`), because a TV win saves a whole
+     * round-trip when YouTube rejects the visionOS response.
+     */
+    private fun fastLanes(specificClient: SpoofClient?): List<SpoofClient> = buildList {
+        add(SpoofClient.VISIONOS)
+        if (hasSessionCookie()) add(SpoofClient.TV_CURRENT)
+    }.filter { it != specificClient }
+
+    /**
+     * Races [clients] and returns the first playable result.
+     *
+     * Only the player request runs concurrently; parsing and deciphering are
+     * serialized through [raceCompletions]' `onResult` because the signature
+     * deobfuscator holds one global Rhino scope at a time. The preferred lane's
+     * result is accepted as-is; any other lane is health-checked first so a fast
+     * but dead URL can never shadow the lane that used to be tried first.
+     */
+    private suspend fun raceSpoofedExtractors(
+        videoId: String,
+        clients: List<SpoofClient>,
+        isVideoRequest: Boolean,
+        targetHeight: Int? = null,
+        timing: ResolveTiming? = null
+    ): ExtractionResult {
+        if (clients.size == 1) {
+            return trySpoofedExtractor(videoId, clients.single(), isVideoRequest, targetHeight, timing)
+        }
+
+        val failures = mutableListOf<String>()
+        var winner: ExtractionResult? = null
+
+        raceCompletions(
+            blocks = clients.map { client -> { fetchPlayerResponse(videoId, client, timing) } },
+            onResult = { fetch ->
+                val result = extractFetched(videoId, fetch, isVideoRequest, targetHeight, timing)
+
+                // visionOS is both the default lane and the one whose URLs are
+                // known-playable, so a win from it is trusted as before. A TV win
+                // is only used after a 403 health check: otherwise a slightly
+                // faster but dead TV URL could shadow a perfectly good visionOS
+                // result that arrived microseconds later. If the check fails, the
+                // race simply moves on to the next buffered lane.
+                val acceptable = result is ExtractionResult.Success &&
+                    (fetch.clientSpoof == SpoofClient.VISIONOS || verifyFastLane(result, timing))
+
+                if (acceptable) {
+                    winner = result
+                    true
+                } else {
+                    if (result is ExtractionResult.Error) {
+                        failures += result.reason
+                    } else if (result is ExtractionResult.Success) {
+                        failures += "${fetch.clientSpoof?.displayName ?: "fast lane"}: stream failed health check (HTTP 403)"
+                    }
+                    false
+                }
+            }
+        )
+
+        return winner ?: ExtractionResult.Error(
+            failures.ifEmpty { listOf("No fast lane returned a playable stream") }.joinToString("\n")
+        )
+    }
+
+    /** A player response, kept separate so extraction can be serialized. */
+    private sealed class PlayerFetch {
+        data class Ok(val client: SpoofClient, val response: YoutubeFormatResponse) : PlayerFetch()
+        data class Failed(val client: SpoofClient, val reason: String) : PlayerFetch()
+
+        val clientSpoof: SpoofClient?
+            get() = when (this) {
+                is Ok -> client
+                is Failed -> client
+            }
+    }
+
+    /**
+     * Checks the source playback would start with. Returns `true` on timeout or any
+     * non-403 response (see [probePlayable]), so it only rejects a lane YouTube has
+     * explicitly refused.
+     */
+    private suspend fun verifyFastLane(result: ExtractionResult, timing: ResolveTiming?): Boolean {
+        val server = (result as? ExtractionResult.Success)?.media as? Streamable.Media.Server ?: return true
+        val source = server.sources.firstOrNull { it.isVideo } ?: server.sources.firstOrNull() ?: return true
+        val url = (source as? Streamable.Source.Http)?.request?.url ?: return true
+        return probePlayable(url, timing)
+    }
+
+    private suspend fun fetchPlayerResponse(
+        videoId: String,
+        client: SpoofClient,
+        timing: ResolveTiming? = null
+    ): PlayerFetch {
+        return try {
+            if (client.requiresStreamToken || client == SpoofClient.WEB_EMBEDDED) {
+                ensureVisitorAvailable(timing)
+            }
+            timing?.lane(client.displayName)
+            println("SpoofClientExtractor: Trying client ${client.displayName} for $videoId")
+            val started = nowMs()
+            val videoResponse = videoEndpoint.getSpoofedVideo(videoId, client)
+            timing?.addPlayer(nowMs() - started)
+            if (videoResponse == null) {
+                PlayerFetch.Failed(client, "${client.displayName} returned no response or playable formats")
+            } else {
+                PlayerFetch.Ok(client, videoResponse)
+            }
+        } catch (e: Exception) {
+            println("SpoofClientExtractor (${client.displayName}) Exception: ${e.message}")
+            PlayerFetch.Failed(client, e.message ?: "${client.displayName} player request failed")
+        }
+    }
+
+    private suspend fun extractFetched(
+        videoId: String,
+        fetch: PlayerFetch,
+        isVideoRequest: Boolean,
+        targetHeight: Int?,
+        timing: ResolveTiming?
+    ): ExtractionResult {
+        return when (fetch) {
+            is PlayerFetch.Failed -> ExtractionResult.Error(fetch.reason)
+            is PlayerFetch.Ok -> try {
+                val started = nowMs()
+                val result = extractMediaFromFormatResponse(
+                    videoId = videoId,
+                    videoResponse = fetch.response,
+                    isVideoRequest = isVideoRequest,
+                    targetHeight = targetHeight,
+                    isMusicOrigin = fetch.client == SpoofClient.WEB_REMIX,
+                    client = fetch.client,
+                    timing = timing
+                )
+                timing?.addExtract(nowMs() - started)
+                result
+            } catch (e: Exception) {
+                println("SpoofClientExtractor (${fetch.client.displayName}) Exception: ${e.message}")
+                ExtractionResult.Error(e.message ?: "${fetch.client.displayName} extraction failed")
+            }
+        }
+    }
+
     private suspend fun trySpoofedExtractor(
         videoId: String,
         client: SpoofClient,
         isVideoRequest: Boolean,
-        targetHeight: Int? = null
-    ): ExtractionResult {
-        return try {
-            println("SpoofClientExtractor: Trying client ${client.displayName} for $videoId (isVideo=$isVideoRequest)")
-            val videoResponse = videoEndpoint.getSpoofedVideo(videoId, client)
-                ?: return ExtractionResult.Error("${client.displayName} returned no response or playable formats")
-            extractMediaFromFormatResponse(
-                videoId = videoId,
-                videoResponse = videoResponse,
-                isVideoRequest = isVideoRequest,
-                targetHeight = targetHeight,
-                isMusicOrigin = client == SpoofClient.WEB_REMIX,
-                client = client
-            )
-        } catch (e: Exception) {
-            println("SpoofClientExtractor (${client.displayName}) Exception: ${e.message}")
-            ExtractionResult.Error(e.message ?: "${client.displayName} extraction failed")
-        }
-    }
+        targetHeight: Int? = null,
+        timing: ResolveTiming? = null
+    ): ExtractionResult = extractFetched(
+        videoId = videoId,
+        fetch = fetchPlayerResponse(videoId, client, timing),
+        isVideoRequest = isVideoRequest,
+        targetHeight = targetHeight,
+        timing = timing
+    )
 
     /**
      * A web-client lane can fail its health check when the token it was given was
@@ -794,9 +1046,10 @@ class YouTubeStreamResolver(
         videoId: String,
         client: SpoofClient,
         isVideoRequest: Boolean,
-        targetHeight: Int? = null
+        targetHeight: Int? = null,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
-        val first = trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight)
+        val first = trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight, timing)
         if (first is ExtractionResult.Success) return first
         val failedReason = (first as? ExtractionResult.Error)?.reason.orEmpty()
         val retryable = client.requiresStreamToken &&
@@ -805,26 +1058,34 @@ class YouTubeStreamResolver(
         if (!retryable) return first
         println("YouTubeStreamResolver: ${client.displayName} rejected its stream URL; retrying with a fresh PO Token")
         poTokenProvider.invalidate()
-        return trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight)
+        return trySpoofedExtractor(videoId, client, isVideoRequest, targetHeight, timing)
     }
 
     private suspend fun tryYouTubeMusicApi(
         videoId: String,
         isVideoRequest: Boolean,
-        targetHeight: Int? = null
+        targetHeight: Int? = null,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
         return try {
-            try {
-                if (api.visitor_id == null) {
-                    api.visitor_id = visitorEndpoint.getVisitorId()
-                }
-            } catch (e: Exception) {
-                println("Exception ensuring visitor ID: ${e.message}")
-            }
+            ensureVisitorAvailable(timing)
+            timing?.lane("YouTubeMusicApi")
 
             // resolve=false avoids the redundant web remix request, cutting network latency in half
+            val started = nowMs()
             val (video, _) = videoEndpoint.getVideo(false, videoId)
-            extractMediaFromFormatResponse(videoId, video, isVideoRequest, targetHeight, isMusicOrigin = true)
+            timing?.addPlayer(nowMs() - started)
+            val extractStarted = nowMs()
+            val result = extractMediaFromFormatResponse(
+                videoId,
+                video,
+                isVideoRequest,
+                targetHeight,
+                isMusicOrigin = true,
+                timing = timing
+            )
+            timing?.addExtract(nowMs() - extractStarted)
+            result
         } catch (e: Exception) {
             ExtractionResult.Error(e.message ?: "Unknown error")
         }
@@ -833,25 +1094,31 @@ class YouTubeStreamResolver(
     private suspend fun tryRestrictedVideoExtractor(
         videoId: String,
         isVideoRequest: Boolean,
-        targetHeight: Int? = null
+        targetHeight: Int? = null,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
         return try {
             // A PO Token is bound to the visitor used for the player request, so
             // the binding must exist before the restricted request is made.
-            if (api.visitor_id == null) {
-                runCatching { api.visitor_id = visitorEndpoint.getVisitorId() }
-            }
+            ensureVisitorAvailable(timing)
+            timing?.lane("RestrictedVideo")
             println("RestrictedVideoExtractor: Trying web_creator / restricted player for $videoId")
+            val started = nowMs()
             val result = videoEndpoint.getRestrictedVideo(videoId)
-                ?: return ExtractionResult.Error("Restricted player returned no response")
-            extractMediaFromFormatResponse(
+            timing?.addPlayer(nowMs() - started)
+            if (result == null) return ExtractionResult.Error("Restricted player returned no response")
+            val extractStarted = nowMs()
+            val extracted = extractMediaFromFormatResponse(
                 videoId = videoId,
                 videoResponse = result.response,
                 isVideoRequest = isVideoRequest,
                 targetHeight = targetHeight,
                 isMusicOrigin = false,
-                client = result.client
+                client = result.client,
+                timing = timing
             )
+            timing?.addExtract(nowMs() - extractStarted)
+            extracted
         } catch (e: Exception) {
             println("RestrictedVideoExtractor Exception: ${e.message}")
             ExtractionResult.Error(e.message ?: "Restricted extraction failed")
@@ -864,7 +1131,8 @@ class YouTubeStreamResolver(
         isVideoRequest: Boolean,
         targetHeight: Int? = null,
         isMusicOrigin: Boolean = false,
-        client: SpoofClient? = null
+        client: SpoofClient? = null,
+        timing: ResolveTiming? = null
     ): ExtractionResult {
         val streamingData = videoResponse.streamingData
             ?: return ExtractionResult.Error("Player response contains no streaming data")
@@ -988,7 +1256,7 @@ class YouTubeStreamResolver(
                 )
                 println("YouTubeStreamResolver: Video request (targetHeight=$targetHeight). Selected: ${videoSource.title} (itag=${selectedVideo.itag}), audio: itag=${bestAudio.itag} (${audioBitrate}kbps). Returning merged video+audio.")
                 // One parallel check for the two streams that will actually play.
-                if (!probeAllPlayable(withToken(selectedVideo.url), withToken(bestAudio.url))) {
+                if (shouldProbe(client) && !probeAllPlayable(withToken(selectedVideo.url), withToken(bestAudio.url), timing = timing)) {
                     if (!token.isNullOrBlank()) poTokenProvider.invalidate()
                     println("YouTubeStreamResolver: Extracted video/audio stream URL rejected with HTTP 403.")
                     return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
@@ -1021,7 +1289,7 @@ class YouTubeStreamResolver(
                             isVideo = true
                         )
                     }
-                    if (!probePlayable(sources.first().request.url)) {
+                    if (shouldProbe(client) && !probePlayable(sources.first().request.url, timing)) {
                         if (!token.isNullOrBlank()) poTokenProvider.invalidate()
                         println("YouTubeStreamResolver: Top video-only source rejected with HTTP 403, rejecting extractor result")
                         return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
@@ -1038,7 +1306,7 @@ class YouTubeStreamResolver(
                     isVideo = false
                 )
                 // Verify the video that will actually play first.
-                if (!probePlayable(videoSource.request.url)) {
+                if (shouldProbe(client) && !probePlayable(videoSource.request.url, timing)) {
                     if (!token.isNullOrBlank()) poTokenProvider.invalidate()
                     println("YouTubeStreamResolver: Top video source rejected with HTTP 403, rejecting extractor result")
                     return ExtractionResult.Error("Video stream failed health check (HTTP 403 Forbidden)")
@@ -1051,7 +1319,7 @@ class YouTubeStreamResolver(
 
             // Fallback: Muxed formats if separate streams unavailable and playable
             val muxedFormats = resolved.filter { (it.itag == 18L || it.itag == 22L) || (it.isVideo && it.mimeType.contains("mp4a")) }
-            val muxed = muxedFormats.firstOrNull { probePlayable(withToken(it.url)) }
+            val muxed = muxedFormats.firstOrNull { probePlayable(withToken(it.url), timing) }
             if (muxed != null) {
                 val h = muxed.height?.toInt() ?: if (muxed.itag == 18L) 360 else 720
                 val muxedSource = Streamable.Source.Http(
@@ -1112,7 +1380,7 @@ class YouTubeStreamResolver(
         // Verify only the source Echo will start with; a dead top source means the
         // whole client response is unusable (all URLs come from the same client), so
         // let the cascade move to the next extractor instead of caching a bad result.
-        if (!probePlayable(sources.first().request.url)) {
+        if (shouldProbe(client) && !probePlayable(sources.first().request.url, timing)) {
             if (!token.isNullOrBlank()) poTokenProvider.invalidate()
             println("YouTubeStreamResolver: Top audio source rejected with HTTP 403, rejecting extractor result")
             // A signed-in user hitting this on a web client without a token means

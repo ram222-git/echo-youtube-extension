@@ -77,9 +77,11 @@ class AndroidPoTokenProvider(
                     }
                 }
 
+                val mintStarted = now()
                 val token = mintWithFreshEngineIfNeeded(binding)
                 if (token.isNullOrBlank()) return null
                 tokenCache[binding] = Cached(token, now() + TOKEN_TTL_MS)
+                PlaybackBench.mark("tokenReady", "kind=android binding=$binding took=${now() - mintStarted}ms")
                 println("AndroidPoTokenProvider: minted PO token (binding=$binding, len=${token.length})")
                 token
             }
@@ -100,6 +102,16 @@ class AndroidPoTokenProvider(
     fun invalidateAll() {
         invalidate()
         destroyEngine()
+    }
+
+    /**
+     * Boots the WebView minting engine ahead of time. The engine boot (WebView +
+     * BotGuard VM + attestation) is the slow half of the first mint, so doing it
+     * while the user is browsing keeps the first play fast.
+     */
+    override suspend fun warmUp() {
+        if (permanentlyBroken) return
+        runCatching { mintMutex.withLock { ensureEngine() } }
     }
 
     private suspend fun mintWithFreshEngineIfNeeded(binding: String): String? {

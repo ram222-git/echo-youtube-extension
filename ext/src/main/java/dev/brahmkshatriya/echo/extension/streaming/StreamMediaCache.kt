@@ -4,6 +4,10 @@ import dev.brahmkshatriya.echo.common.models.Streamable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * In-memory cache for resolved [Streamable.Media] with a TTL and an LRU bound.
@@ -11,11 +15,20 @@ import java.util.concurrent.ConcurrentHashMap
  * Two playbacks of the same track (or a prefetch racing the actual play request)
  * must not repeat the whole extraction cascade, so [getOrResolve] also performs
  * single-flight resolution per key.
+ *
+ * When a [StreamCacheStore] is supplied the current LRU snapshot is persisted
+ * (debounced, on a daemon thread) and re-loaded lazily on first access, so the
+ * **first tap after an app restart** can be a cache hit within the URL validity
+ * window instead of a fresh player request. Entries are never revived past
+ * their expiry, and nothing sensitive (cookies, PO tokens) is stored — signed
+ * stream URLs are IP-bound to this device and carry their own expiry.
  */
 class StreamMediaCache(
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
     private val ttlMs: Long = DEFAULT_TTL_MS,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val store: StreamCacheStore? = null,
+    private val persistDebounceMs: Long = PERSIST_DEBOUNCE_MS
 ) {
     private data class Entry(val media: Streamable.Media, val expiresAt: Long)
 
@@ -26,29 +39,90 @@ class StreamMediaCache(
     private val entryLock = Any()
     private val keyLocks = ConcurrentHashMap<String, Mutex>()
 
-    fun get(key: String): Streamable.Media? = synchronized(entryLock) {
-        val entry = entries[key] ?: return null
-        if (entry.expiresAt <= clock()) {
-            entries.remove(key)
-            null
-        } else {
-            entry.media
+    @Volatile
+    private var loadedFromStore = store == null
+    private val persistExecutor: ScheduledExecutorService? =
+        if (store == null) null
+        else Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "stream-cache-persist").apply { isDaemon = true }
+        }
+
+    @Volatile
+    private var persistFuture: ScheduledFuture<*>? = null
+
+    private fun loadFromStoreIfNeeded() {
+        if (loadedFromStore) return
+        val stored = store?.load().orEmpty()
+        synchronized(entryLock) {
+            // Newest entries win; anything already expired is dropped, never revived.
+            stored.filter { it.expiresAt > clock() }
+                .sortedBy { it.expiresAt }
+                .forEach { entries[it.key] = Entry(it.media, it.expiresAt) }
+            trimToBound()
+        }
+        loadedFromStore = true
+    }
+
+    private fun trimToBound() {
+        while (entries.size > maxEntries) {
+            val eldest = entries.keys.firstOrNull() ?: break
+            entries.remove(eldest)
         }
     }
 
-    fun put(key: String, media: Streamable.Media, ttl: Long = ttlMs): Unit = synchronized(entryLock) {
-        entries[key] = Entry(media, clock() + ttl)
+    /** Schedules a debounced, best-effort persist of the current snapshot. */
+    private fun schedulePersist() {
+        val snapshot = synchronized(entryLock) {
+            entries.entries
+                .filter { it.value.expiresAt > clock() }
+                .map { StoredStream(it.key, it.value.expiresAt, it.value.media) }
+        }
+        val executor = persistExecutor ?: return
+        persistFuture?.cancel(false)
+        persistFuture = executor.schedule({
+            store?.save(snapshot)
+        }, persistDebounceMs, TimeUnit.MILLISECONDS)
+    }
+
+    fun get(key: String): Streamable.Media? {
+        loadFromStoreIfNeeded()
+        return synchronized(entryLock) {
+            val entry = entries[key] ?: return null
+            if (entry.expiresAt <= clock()) {
+                entries.remove(key)
+                null
+            } else {
+                entry.media
+            }
+        }
+    }
+
+    fun put(key: String, media: Streamable.Media, ttl: Long = ttlMs): Unit {
+        loadFromStoreIfNeeded()
+        synchronized(entryLock) {
+            entries[key] = Entry(media, clock() + ttl)
+            trimToBound()
+        }
+        schedulePersist()
     }
 
     /** Drops every entry whose key starts with [prefix] (e.g. `"$videoId|"`). */
-    fun invalidate(prefix: String) = synchronized(entryLock) {
-        val iterator = entries.keys.iterator()
-        while (iterator.hasNext()) {
-            if (iterator.next().startsWith(prefix)) iterator.remove()
+    fun invalidate(prefix: String) {
+        loadFromStoreIfNeeded()
+        synchronized(entryLock) {
+            val iterator = entries.keys.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next().startsWith(prefix)) iterator.remove()
+            }
         }
+        schedulePersist()
     }
 
-    fun clear() = synchronized(entryLock) { entries.clear() }
+    fun clear() {
+        loadFromStoreIfNeeded()
+        synchronized(entryLock) { entries.clear() }
+        store?.clear()
+    }
 
     /**
      * Returns the cached media for [key], or runs [resolve] exactly once even when
@@ -76,5 +150,6 @@ class StreamMediaCache(
     companion object {
         const val DEFAULT_MAX_ENTRIES = 64
         const val DEFAULT_TTL_MS = 25 * 60 * 1000L
+        private const val PERSIST_DEBOUNCE_MS = 500L
     }
 }

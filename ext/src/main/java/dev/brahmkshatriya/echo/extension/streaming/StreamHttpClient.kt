@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.extension.streaming
 
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
 /**
@@ -66,5 +67,25 @@ internal object StreamHttpClient {
             .readTimeout(12, TimeUnit.SECONDS)
             .callTimeout(15, TimeUnit.SECONDS)
             .build()
+    }
+
+    /**
+     * Pre-opens DNS + TCP + TLS + HTTP/2 to the host the Innertube player request
+     * uses, so the first play does not pay for a cold handshake.
+     *
+     * The startup visitor-id fetch runs on the Ktor client, which has its own
+     * connection pool, so this has to be done separately. Best-effort: a failure
+     * (offline, captive portal) only costs the time already spent.
+     */
+    fun warmUpPlayer() {
+        runCatching {
+            val request = Request.Builder()
+                .url("https://www.youtube.com/generate_204")
+                .header("User-Agent", SpoofClient.VISIONOS.userAgent)
+                .build()
+            player.newCall(request).execute().use { it.close() }
+        }.onFailure {
+            println("StreamHttpClient: player connection warm-up failed (${it.message})")
+        }
     }
 }

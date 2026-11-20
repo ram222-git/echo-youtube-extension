@@ -11,6 +11,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -103,5 +104,55 @@ class StreamMediaCacheTest {
     fun testDirectUrlWithoutSignatureOrNIsReturnedUnchanged() {
         val url = "https://rr1---sn-example.googlevideo.com/videoplayback?expire=1&itag=251"
         assertEquals(url, YouTubeSignatureDeobfuscator.deobfuscateStreamUrl("video", url, null))
+    }
+
+    @Test
+    fun testStorePersistsEntriesForTheNextInstance() {
+        val file = java.io.File(
+            java.nio.file.Files.createTempDirectory("stream-cache-test").toFile(),
+            "stream-cache.json"
+        )
+        val store = dev.brahmkshatriya.echo.extension.streaming.FileStreamCacheStore(file)
+        var now = 1_000L
+        val cache = StreamMediaCache(ttlMs = 500L, clock = { now }, store = store, persistDebounceMs = 0)
+        val resolved = media()
+        cache.put("v1|audio|0|auto|off:anon", resolved)
+
+        // The persist is debounced on a daemon thread; poll briefly for the file.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!file.isFile && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertTrue("cache file was not persisted", file.isFile)
+
+        // A fresh cache (app restart) within the expiry window serves the entry.
+        // Equality, not identity: the entry went through a JSON round-trip.
+        val reloaded = StreamMediaCache(ttlMs = 500L, clock = { now }, store = store)
+        assertEquals(resolved, reloaded.get("v1|audio|0|auto|off:anon"))
+
+        // Past expiry the entry is dropped, never revived.
+        now += 600
+        assertNull(reloaded.get("v1|audio|0|auto|off:anon"))
+        file.delete()
+    }
+
+    @Test
+    fun testClearRemovesThePersistedStore() {
+        val file = java.io.File(
+            java.nio.file.Files.createTempDirectory("stream-cache-test").toFile(),
+            "stream-cache.json"
+        )
+        val store = dev.brahmkshatriya.echo.extension.streaming.FileStreamCacheStore(file)
+        val cache = StreamMediaCache(clock = { 1_000L }, store = store, persistDebounceMs = 0)
+        cache.put("v1|audio|0|auto|off:anon", media())
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!file.isFile && System.currentTimeMillis() < deadline) Thread.sleep(20)
+
+        cache.clear()
+
+        assertNull(cache.get("v1|audio|0|auto|off:anon"))
+        assertTrue(
+            "store entries survived clear()",
+            store.load().none { it.key == "v1|audio|0|auto|off:anon" }
+        )
+        file.delete()
     }
 }
