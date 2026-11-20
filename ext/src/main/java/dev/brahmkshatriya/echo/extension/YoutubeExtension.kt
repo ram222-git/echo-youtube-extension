@@ -52,6 +52,7 @@ import dev.brahmkshatriya.echo.extension.providers.ExtensionComponents
 import dev.brahmkshatriya.echo.extension.streaming.SettingsPoTokenProvider
 import dev.brahmkshatriya.echo.extension.streaming.SpoofClient
 import dev.brahmkshatriya.echo.extension.utils.CookieParser
+import dev.brahmkshatriya.echo.extension.utils.SingleFlight
 import dev.brahmkshatriya.echo.extension.utils.WebViewCookieWaiter
 import dev.brahmkshatriya.echo.extension.utils.stringSetting
 import dev.toastbits.ytmkt.endpoint.SearchType
@@ -446,6 +447,18 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
     private val artistIdCache = mutableMapOf<String, String>()
 
+    /**
+     * The host loads an artist page through several concurrent flows (details,
+     * feed) that each end in the same browse; share one request per artist, and
+     * keep name→id resolution (which can cost a full search) stable across opens.
+     */
+    private val artistResolveFlight = SingleFlight<String>(
+        ttlMs = 10 * 60_000L, maxEntries = 64
+    )
+    private val artistBrowseFlight = SingleFlight<YtmArtist>(
+        ttlMs = 30_000L, maxEntries = 16
+    )
+
     private suspend fun resolveArtistId(artist: Artist): String? {
         if (artist.id.isNotBlank() && (artist.id.startsWith("UC") || artist.id.startsWith("FEmusic_library"))) {
             return artist.id
@@ -455,24 +468,26 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
 
         artistIdCache[name.lowercase()]?.let { return it }
 
-        val searchedId = runCatching {
-            val searchRes = api.Search.search(
-                name,
-                params = SearchType.ARTIST.getDefaultParams()
-            ).getOrThrow()
+        // "not found" is cached too (as empty), so one unsearchable name
+        // cannot trigger a search on every page open.
+        val searchedId = artistResolveFlight.getOrStart(name.lowercase()) {
+            runCatching {
+                val searchRes = api.Search.search(
+                    name,
+                    params = SearchType.ARTIST.getDefaultParams()
+                ).getOrThrow()
 
-            val ytmArtist = searchRes.categories.flatMap { it.first.items }
-                .filterIsInstance<YtmArtist>()
-                .firstOrNull { it.id.startsWith("UC") }
+                val ytmArtist = searchRes.categories.flatMap { it.first.items }
+                    .filterIsInstance<YtmArtist>()
+                    .firstOrNull { it.id.startsWith("UC") }
 
-            ytmArtist?.id
-        }.getOrNull()
-
-        if (!searchedId.isNullOrBlank()) {
-            artistIdCache[name.lowercase()] = searchedId
-            return searchedId
+                ytmArtist?.id
+            }.getOrNull().orEmpty()
         }
-        return null
+        if (searchedId.isBlank()) return null
+
+        artistIdCache[name.lowercase()] = searchedId
+        return searchedId
     }
 
     private suspend fun getArtistMediaItems(artist: Artist): List<Shelf> {
@@ -485,8 +500,10 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
         }
 
         val result =
-            loadedArtist.takeIf { targetId == it?.id } ?: api.LoadArtist.loadArtist(targetId)
-                .getOrThrow()
+            loadedArtist.takeIf { targetId == it?.id }
+                ?: artistBrowseFlight.getOrStart("browse:$targetId") {
+                    api.LoadArtist.loadArtist(targetId).getOrThrow()
+                }
 
         return result.layouts?.map {
             val title = it.title?.getString(ENGLISH)
@@ -529,7 +546,9 @@ class YoutubeExtension : ExtensionClient, HomeFeedClient, TrackClient, SearchFee
             return artist
         }
         return try {
-            val result = artistEndPoint.loadArtist(targetId)
+            val result = artistBrowseFlight.getOrStart("browse:$targetId") {
+                artistEndPoint.loadArtist(targetId)
+            }
             loadedArtist = result
             val converted = result.toArtist(HIGH)
             val finalName = if ((converted.name.isBlank() || converted.name == "Unknown") && artist.name.isNotBlank() && artist.name != "Unknown") {

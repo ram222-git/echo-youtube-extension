@@ -7,6 +7,7 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.YoutubeExtension.Companion.SONGS
 import dev.brahmkshatriya.echo.extension.toAlbum
 import dev.brahmkshatriya.echo.extension.toTrack
+import dev.brahmkshatriya.echo.extension.utils.SingleFlight
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiApi
 import dev.toastbits.ytmkt.impl.youtubei.YoutubeiPostBody
 import dev.toastbits.ytmkt.model.ApiEndpoint
@@ -33,6 +34,29 @@ class EchoPlaylistEndpoint(
     val albumShelvesMap = mutableMapOf<String, List<MediaItemLayout>>()
     private val continuationEndpoint = EchoPlaylistContinuationEndpoint(api)
 
+    /**
+     * The host fires the details, tracks and feed flows concurrently per page
+     * open, each reaching [loadFromPlaylist] — this makes the duplicates share
+     * one browse sequence, and keeps the parsed page for a few seconds so
+     * back-navigation re-opens cost nothing.
+     */
+    private val pageFlight = SingleFlight<Triple<YtmPlaylist, String?, PagedData<Track>>>(
+        ttlMs = PAGE_CACHE_TTL_MS,
+        maxEntries = 24
+    )
+
+    /** `navigation/resolve_url` results are stable per playlist id; never re-fetch. */
+    private val resolveFlight = SingleFlight<ResolvedPlaylistEndpoint>(
+        ttlMs = RESOLVE_CACHE_TTL_MS,
+        maxEntries = 128
+    )
+
+    private data class ResolvedPlaylistEndpoint(
+        val browseId: String?,
+        val params: String?,
+        val isAlbumPageType: Boolean
+    )
+
     private fun formatBrowseId(browseId: String) =
         if (!browseId.startsWith("VL") && !browseId.startsWith("MPREb_")) "VL$browseId"
         else browseId
@@ -43,9 +67,20 @@ class EchoPlaylistEndpoint(
         quality: ThumbnailProvider.Quality,
         isAlbum: Boolean = false,
         fallbackAlbum: Album? = null
-    ): Triple<YtmPlaylist, String?, PagedData<Track>> = run {
+    ): Triple<YtmPlaylist, String?, PagedData<Track>> {
+        val key = "${cleanId(playlistId)}|$isAlbum|$params|$quality"
+        return pageFlight.getOrStart(key) {
+            loadFromPlaylistInternal(playlistId, params, quality, isAlbum, fallbackAlbum)
+        }
+    }
 
-        val endpoint = if (!playlistId.startsWith("MPREb_"))
+    /**
+     * Canonicalizes a playlist id via `navigation/resolve_url`. A failure here is
+     * not fatal — the deterministic `formatBrowseId` fallback may still work — so
+     * it degrades to "unresolved" instead of failing the page.
+     */
+    private suspend fun resolvePlaylistEndpoint(playlistId: String): ResolvedPlaylistEndpoint {
+        val endpoint = runCatching {
             api.client.request {
                 endpointPath("navigation/resolve_url")
                 addApiHeadersWithAuthenticated()
@@ -57,10 +92,32 @@ class EchoPlaylistEndpoint(
                     it.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType
                 pageType == "MUSIC_PAGE_TYPE_PLAYLIST" || pageType == "MUSIC_PAGE_TYPE_ALBUM"
             }
-        else null
+        }.onFailure {
+            println("EchoPlaylistEndpoint: resolve_url failed for $playlistId (${it.javaClass.simpleName}: ${it.message})")
+        }.getOrNull()
 
-        val id = endpoint?.browseId ?: formatBrowseId(playlistId)
-        val param = endpoint?.params ?: params
+        return ResolvedPlaylistEndpoint(
+            browseId = endpoint?.browseId,
+            params = endpoint?.params,
+            isAlbumPageType = endpoint?.browseEndpointContextSupportedConfigs
+                ?.browseEndpointContextMusicConfig?.pageType == "MUSIC_PAGE_TYPE_ALBUM"
+        )
+    }
+
+    private suspend fun loadFromPlaylistInternal(
+        playlistId: String,
+        params: String? = null,
+        quality: ThumbnailProvider.Quality,
+        isAlbum: Boolean = false,
+        fallbackAlbum: Album? = null
+    ): Triple<YtmPlaylist, String?, PagedData<Track>> = run {
+
+        val resolved = if (!playlistId.startsWith("MPREb_")) {
+            resolveFlight.getOrStart(cleanId(playlistId)) { resolvePlaylistEndpoint(playlistId) }
+        } else null
+
+        val id = resolved?.browseId ?: formatBrowseId(playlistId)
+        val param = resolved?.params ?: params
 
         val res = api.client.request {
             endpointPath("browse")
@@ -87,7 +144,7 @@ class EchoPlaylistEndpoint(
             id.startsWith("MPREb_") ||
             cleanId(id).startsWith("MPREb_") ||
             playlistId.startsWith("MPREb_") ||
-            endpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType == "MUSIC_PAGE_TYPE_ALBUM" ||
+            resolved?.isAlbumPageType == true ||
             playlist.type == YtmPlaylist.Type.ALBUM
 
         val resolvedAlbum = if (isAlbumType) {
@@ -199,6 +256,10 @@ class EchoPlaylistEndpoint(
         fun cleanId(playlistId: String) =
             if (playlistId.startsWith("VL")) playlistId.substring(2)
             else playlistId
+
+        /** Re-open of the same album/playlist within this window costs no network. */
+        const val PAGE_CACHE_TTL_MS = 30_000L
+        const val RESOLVE_CACHE_TTL_MS = 10 * 60_000L
 
         private val regex = Regex("(\\d+) $SONGS")
         fun List<TextRun>.findSongCount(): Int? {
